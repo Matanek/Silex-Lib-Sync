@@ -1,0 +1,12 @@
+{
+  "name": "Sync",
+  "version": "0.1.0",
+  "description": "Persistent communication and shared-state synchronization for games and interactive applications.",
+  "authors": ["Matanek"],
+  "requires": {
+    "silex": ">=0.39.0"
+  },
+  "dependencies": {
+    "STD": "^0.19.0"
+  }
+}

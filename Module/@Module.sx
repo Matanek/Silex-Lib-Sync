@@ -1,0 +1,3 @@
+// Sync intentionally exposes no runtime declarations yet. The package root is
+// established independently from its future Session, Channel, Replication and
+// Netcode capabilities so their contracts can be designed from real usages.

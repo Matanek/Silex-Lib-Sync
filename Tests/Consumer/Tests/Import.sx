@@ -1,0 +1,5 @@
+use Sync
+
+test "import the public Sync package root" {
+    assert(true)
+}
