@@ -1,7 +1,7 @@
 # SecureCrypto boundary
 
-`SecureSession` uses a small C ABI implemented with the audited primitives in
-Zig's standard library. The Silex source wrapper lives in
+`SecureSession` uses a small C ABI implemented with the standard cryptographic
+primitives in Zig's standard library. The Silex source wrapper lives in
 `Module/SecureSession/Crypto.sx`; the complete native source is
 `Source/SecureCrypto.zig`.
 
