@@ -1,0 +1,71 @@
+use Sync
+use Sync.Netcode
+
+test "exchange sequenced datagrams through the public Netcode API" {
+    func run() Result<void, Sync.Error> {
+        let options = Netcode.default_options()
+            .with_payload_limit(64)
+            .with_write_timeout(2_000)
+
+        var server = try Netcode.bind("127.0.0.1", 0, options)
+        var client = try Netcode.bind("127.0.0.1", 0, options)
+        let server_endpoint = try server.local_endpoint()
+
+        var sequence = Netcode.Sequencer(41)
+        let state:uint8[] = [10, 20, 30, 40]
+        try client.send(
+            server_endpoint,
+            3,
+            sequence.take(),
+            @state[0:state.count()]
+        )
+
+        var reusable:uint8[64]
+        var reusable_view = &reusable[0:64]
+        let received = try server.receive_into(reusable_view)
+        assert(received.channel == 3)
+        assert(received.sequence == 41)
+        assert(received.payload_bytes == 4)
+        assert(reusable_view[0] == 10 && reusable_view[3] == 40)
+
+        let reply:uint8[] = [99]
+        try server.send(received.sender, 4, 8, @reply[0:reply.count()])
+        let datagram = try client.receive()
+        assert(datagram.channel == 4)
+        assert(datagram.sequence == 8)
+        assert(datagram.payload.count() == 1 && datagram.payload[0] == 99)
+
+        var oversized:uint8[] = []
+        var index = 0
+        while index < 65 { oversized.append(1 as uint8); index++ }
+        match client.send(server_endpoint, 1, 42, @oversized[0:oversized.count()]) {
+            success => { panic("oversized Netcode payload should fail") }
+            failure(error) => { assert(error.kind == Sync.ErrorKind.message_limit) }
+        }
+
+        try client.close()
+        try server.close()
+        assert(client.is_closed() && server.is_closed())
+        try client.close()
+        return Result<void, Sync.Error>.success()
+    }
+
+    match run() {
+        success => {}
+        failure(error) => { panic(error.operation + ": " + error.detail) }
+    }
+}
+
+test "reject invalid Netcode resource policies" {
+    let invalid = Netcode.default_options().with_payload_limit(0)
+    match Netcode.bind("127.0.0.1", 0, invalid) {
+        success(host) => { panic("invalid payload limit should fail") }
+        failure(error) => { assert(error.kind == Sync.ErrorKind.invalid_configuration) }
+    }
+
+    let negative = Netcode.default_options().with_read_timeout(-1)
+    match Netcode.bind("127.0.0.1", 0, negative) {
+        success(host) => { panic("negative timeout should fail") }
+        failure(error) => { assert(error.kind == Sync.ErrorKind.invalid_configuration) }
+    }
+}

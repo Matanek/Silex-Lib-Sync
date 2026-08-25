@@ -1,5 +1,4 @@
 use Sync
-use STD.Error as StandardError
 use STD.IO
 use STD.Network
 use STD.Network.TCP
@@ -127,7 +126,7 @@ public class Connection {
             match IO.write_all<TCP.Stream>(connection, @header[0:header.count()]) {
                 success => {}
                 failure(error) => {
-                    let failure = network_error("sync.session.send", error)
+                    let failure = Sync.network_failure("sync.session.send", error)
                     self.invalidate()
                     return Result<void, Sync.Error>.failure(failure)
                 }
@@ -136,7 +135,7 @@ public class Connection {
                 match IO.write_all<TCP.Stream>(connection, payload) {
                     success => {}
                     failure(error) => {
-                        let failure = network_error("sync.session.send", error)
+                        let failure = Sync.network_failure("sync.session.send", error)
                         self.invalidate()
                         return Result<void, Sync.Error>.failure(failure)
                     }
@@ -158,7 +157,7 @@ public class Connection {
             match IO.read_exact<TCP.Stream>(connection, &header[0:header.count()]) {
                 success => {}
                 failure(error) => {
-                    let failure = network_error("sync.session.receive", error)
+                    let failure = Sync.network_failure("sync.session.receive", error)
                     self.invalidate()
                     return Result<Sync.Message, Sync.Error>.failure(failure)
                 }
@@ -190,7 +189,7 @@ public class Connection {
                 match IO.read_exact<TCP.Stream>(connection, &payload[0:payload.count()]) {
                     success => {}
                     failure(error) => {
-                        let failure = network_error("sync.session.receive", error)
+                        let failure = Sync.network_failure("sync.session.receive", error)
                         self.invalidate()
                         return Result<Sync.Message, Sync.Error>.failure(failure)
                     }
@@ -208,7 +207,7 @@ public class Connection {
         if var connection = self.stream {
             match connection.local_endpoint() {
                 success(value) => { return Result<Network.Endpoint, Sync.Error>.success(value) }
-                failure(error) => { return Result<Network.Endpoint, Sync.Error>.failure(network_error(
+                failure(error) => { return Result<Network.Endpoint, Sync.Error>.failure(Sync.network_failure(
                     "sync.session.local_endpoint", error
                 )) }
             }
@@ -222,7 +221,7 @@ public class Connection {
         if var connection = self.stream {
             match connection.peer_endpoint() {
                 success(value) => { return Result<Network.Endpoint, Sync.Error>.success(value) }
-                failure(error) => { return Result<Network.Endpoint, Sync.Error>.failure(network_error(
+                failure(error) => { return Result<Network.Endpoint, Sync.Error>.failure(Sync.network_failure(
                     "sync.session.peer_endpoint", error
                 )) }
             }
@@ -237,7 +236,7 @@ public class Connection {
             self.stream = null
             match TCP.close(move connection) {
                 success => { return Result<void, Sync.Error>.success() }
-                failure(error) => { return Result<void, Sync.Error>.failure(network_error(
+                failure(error) => { return Result<void, Sync.Error>.failure(Sync.network_failure(
                     "sync.session.close", error
                 )) }
             }
@@ -267,7 +266,7 @@ public class Listener {
         if var listener = self.socket {
             match TCP.local_endpoint(listener) {
                 success(value) => { return Result<Network.Endpoint, Sync.Error>.success(value) }
-                failure(error) => { return Result<Network.Endpoint, Sync.Error>.failure(network_error(
+                failure(error) => { return Result<Network.Endpoint, Sync.Error>.failure(Sync.network_failure(
                     "sync.session.listener_endpoint", error
                 )) }
             }
@@ -290,7 +289,7 @@ public class Listener {
                         self.options.maximum_message_bytes
                     ))
                 }
-                failure(error) => { return Result<Connection, Sync.Error>.failure(network_error(
+                failure(error) => { return Result<Connection, Sync.Error>.failure(Sync.network_failure(
                     "sync.session.accept", error
                 )) }
             }
@@ -303,7 +302,7 @@ public class Listener {
             self.socket = null
             match TCP.close(move listener) {
                 success => { return Result<void, Sync.Error>.success() }
-                failure(error) => { return Result<void, Sync.Error>.failure(network_error(
+                failure(error) => { return Result<void, Sync.Error>.failure(Sync.network_failure(
                     "sync.session.listener_close", error
                 )) }
             }
@@ -333,7 +332,7 @@ public func connect_endpoint(
                 options.maximum_message_bytes
             ))
         }
-        failure(error) => { return Result<Connection, Sync.Error>.failure(network_error(
+        failure(error) => { return Result<Connection, Sync.Error>.failure(Sync.network_failure(
             "sync.session.connect", error
         )) }
     }
@@ -355,7 +354,7 @@ public func connect(host:str, port:uint16, options:Options) Result<Connection, S
                 options.maximum_message_bytes
             ))
         }
-        failure(error) => { return Result<Connection, Sync.Error>.failure(network_error(
+        failure(error) => { return Result<Connection, Sync.Error>.failure(Sync.network_failure(
             "sync.session.connect", error
         )) }
     }
@@ -374,7 +373,7 @@ public func listen_endpoint(
         success(listener) => {
             return Result<Listener, Sync.Error>.success(Listener(listener, options))
         }
-        failure(error) => { return Result<Listener, Sync.Error>.failure(network_error(
+        failure(error) => { return Result<Listener, Sync.Error>.failure(Sync.network_failure(
             "sync.session.listen", error
         )) }
     }
@@ -515,18 +514,4 @@ func tcp_stream_options(options:Options) TCP.StreamOptions {
 
 func closed_error(operation:str) Sync.Error {
     return Sync.failure(Sync.ErrorKind.closed, operation, null, "Sync session is closed")
-}
-
-func network_error(operation:str, error:StandardError) Sync.Error {
-    var kind = Sync.ErrorKind.network
-    if error.kind == StandardError.Kind.timed_out || error.kind == StandardError.Kind.would_block {
-        kind = Sync.ErrorKind.timeout
-    } elif error.kind == StandardError.Kind.unexpected_end ||
-        error.kind == StandardError.Kind.broken_pipe ||
-        error.kind == StandardError.Kind.connection_aborted ||
-        error.kind == StandardError.Kind.connection_reset ||
-        error.kind == StandardError.Kind.not_connected {
-        kind = Sync.ErrorKind.closed
-    }
-    return Sync.failure(kind, operation, error.subject, error.detail)
 }

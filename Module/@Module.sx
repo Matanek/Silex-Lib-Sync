@@ -1,4 +1,5 @@
 use STD.Text.UTF8
+use STD.Error as StandardError
 
 public enum ErrorKind {
     invalid_configuration
@@ -40,4 +41,18 @@ public struct Message {
 
 package func failure(kind:ErrorKind, operation:str, subject:str?, detail:str) Error {
     return Error(kind:kind, operation:operation, subject:subject, detail:detail)
+}
+
+package func network_failure(operation:str, error:StandardError) Error {
+    var kind = ErrorKind.network
+    if error.kind == StandardError.Kind.timed_out || error.kind == StandardError.Kind.would_block {
+        kind = ErrorKind.timeout
+    } elif error.kind == StandardError.Kind.unexpected_end ||
+        error.kind == StandardError.Kind.broken_pipe ||
+        error.kind == StandardError.Kind.connection_aborted ||
+        error.kind == StandardError.Kind.connection_reset ||
+        error.kind == StandardError.Kind.not_connected {
+        kind = ErrorKind.closed
+    }
+    return failure(kind, operation, error.subject, error.detail)
 }

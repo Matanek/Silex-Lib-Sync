@@ -1,0 +1,71 @@
+use Sync
+use Sync.Netcode
+
+func require_header(
+    result:Result<Netcode.FrameHeader, Sync.Error>
+) Netcode.FrameHeader {
+    var output:Netcode.FrameHeader? = null
+    match result {
+        success(value) => { output = value }
+        failure(error) => { panic(error.operation + ": " + error.detail) }
+    }
+    if let value = output { return value }
+    panic("decoded Sync Netcode header should be present")
+}
+
+test "encode and decode the stable Netcode datagram header" {
+    let bytes = Netcode.encode_header(513, 16_909_060 as uint32, 1_200)
+    assert(bytes[0] == 83 && bytes[1] == 89 && bytes[2] == 78 && bytes[3] == 67)
+    assert(bytes[4] == 1 && bytes[5] == 1)
+    assert(bytes[6] == 2 && bytes[7] == 1)
+    assert(bytes[8] == 1 && bytes[9] == 2 && bytes[10] == 3 && bytes[11] == 4)
+    assert(bytes[12] == 4 && bytes[13] == 176)
+    assert(bytes[14] == 0 && bytes[15] == 0)
+
+    let header = require_header(Netcode.decode_header(@bytes[0:bytes.count()]))
+    assert(header.channel == 513)
+    assert(header.sequence == 16_909_060 as uint32)
+    assert(header.payload_bytes == 1_200)
+}
+
+test "compare wrapped Netcode sequence numbers" {
+    assert(Netcode.is_newer(1, 0))
+    assert(!Netcode.is_newer(0, 0))
+    assert(Netcode.is_newer(0, 4_294_967_295 as uint32))
+    assert(!Netcode.is_newer(4_294_967_295 as uint32, 0))
+
+    var sequence = Netcode.Sequencer(4_294_967_295 as uint32)
+    assert(sequence.take() == 4_294_967_295 as uint32)
+    assert(sequence.peek() == 0)
+    assert(sequence.take() == 0)
+    assert(sequence.peek() == 1)
+}
+
+test "reject malformed Netcode datagram headers" {
+    var invalid_signature = Netcode.encode_header(1, 0, 0)
+    invalid_signature[0] = 0
+    match Netcode.decode_header(@invalid_signature[0:invalid_signature.count()]) {
+        success(value) => { panic("invalid signature should fail") }
+        failure(error) => { assert(error.kind == Sync.ErrorKind.malformed_message) }
+    }
+
+    var unsupported = Netcode.encode_header(1, 0, 0)
+    unsupported[4] = 2
+    match Netcode.decode_header(@unsupported[0:unsupported.count()]) {
+        success(value) => { panic("unsupported version should fail") }
+        failure(error) => { assert(error.kind == Sync.ErrorKind.unsupported_version) }
+    }
+
+    var wrong_kind = Netcode.encode_header(1, 0, 0)
+    wrong_kind[5] = 0
+    match Netcode.decode_header(@wrong_kind[0:wrong_kind.count()]) {
+        success(value) => { panic("wrong datagram kind should fail") }
+        failure(error) => { assert(error.kind == Sync.ErrorKind.malformed_message) }
+    }
+
+    let short:uint8[] = [83, 89, 78, 67]
+    match Netcode.decode_header(@short[0:short.count()]) {
+        success(value) => { panic("short datagram header should fail") }
+        failure(error) => { assert(error.kind == Sync.ErrorKind.malformed_message) }
+    }
+}

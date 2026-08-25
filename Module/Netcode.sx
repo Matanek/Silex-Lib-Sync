@@ -1,0 +1,476 @@
+use Sync
+use STD.Network
+use STD.Network.UDP
+
+public struct Options {
+    let maximum_payload_bytes:int
+    let read_timeout_milliseconds:int?
+    let write_timeout_milliseconds:int?
+
+    func with_payload_limit(maximum_bytes:int) Options {
+        return Options(
+            maximum_payload_bytes:maximum_bytes,
+            read_timeout_milliseconds:self.read_timeout_milliseconds,
+            write_timeout_milliseconds:self.write_timeout_milliseconds
+        )
+    }
+
+    func with_read_timeout(milliseconds:int?) Options {
+        return Options(
+            maximum_payload_bytes:self.maximum_payload_bytes,
+            read_timeout_milliseconds:milliseconds,
+            write_timeout_milliseconds:self.write_timeout_milliseconds
+        )
+    }
+
+    func with_write_timeout(milliseconds:int?) Options {
+        return Options(
+            maximum_payload_bytes:self.maximum_payload_bytes,
+            read_timeout_milliseconds:self.read_timeout_milliseconds,
+            write_timeout_milliseconds:milliseconds
+        )
+    }
+
+    func without_timeouts() Options {
+        return Options(
+            maximum_payload_bytes:self.maximum_payload_bytes,
+            read_timeout_milliseconds:null,
+            write_timeout_milliseconds:null
+        )
+    }
+}
+
+public func default_options() Options {
+    return Options(
+        maximum_payload_bytes:1_200,
+        read_timeout_milliseconds:null,
+        write_timeout_milliseconds:5_000
+    )
+}
+
+public struct Datagram {
+    let sender:Network.Endpoint
+    let channel:uint16
+    let sequence:uint32
+    let payload:uint8[]
+}
+
+public struct Received {
+    let sender:Network.Endpoint
+    let channel:uint16
+    let sequence:uint32
+    let payload_bytes:int
+}
+
+public class Sequencer {
+    private var next_value:uint32
+
+    init(first:uint32 = 0) { self.next_value = first }
+
+    func peek() uint32 { return self.next_value }
+
+    func take() uint32 {
+        let value = self.next_value
+        if self.next_value == 4_294_967_295 as uint32 { self.next_value = 0 }
+        else { self.next_value++ }
+        return value
+    }
+}
+
+public func is_newer(sequence:uint32, reference:uint32) bool {
+    if sequence == reference { return false }
+    let half = 2_147_483_648 as uint32
+    if sequence > reference { return sequence - reference < half }
+    return reference - sequence > half
+}
+
+public class Host {
+    private var socket:UDP.Socket?
+    private let options:Options
+    private var send_buffer:uint8[]
+    private var receive_buffer:uint8[]
+
+    package init(value:UDP.Socket, options:Options) {
+        self.socket = value
+        self.options = options
+        self.send_buffer = byte_buffer(16 + options.maximum_payload_bytes)
+        self.receive_buffer = byte_buffer(16 + options.maximum_payload_bytes)
+    }
+
+    func is_closed() bool { return self.socket == null }
+
+    func local_endpoint() Result<Network.Endpoint, Sync.Error> {
+        if var transport = self.socket {
+            match UDP.local_endpoint(transport) {
+                success(endpoint) => { return Result<Network.Endpoint, Sync.Error>.success(endpoint) }
+                failure(error) => { return Result<Network.Endpoint, Sync.Error>.failure(
+                    Sync.network_failure("sync.netcode.local_endpoint", error)
+                ) }
+            }
+        }
+        return Result<Network.Endpoint, Sync.Error>.failure(closed_error(
+            "sync.netcode.local_endpoint"
+        ))
+    }
+
+    func send(
+        destination:Network.Endpoint,
+        channel:uint16,
+        sequence:uint32,
+        payload:@uint8[..]
+    ) Result<void, Sync.Error> {
+        if payload.count() > self.options.maximum_payload_bytes {
+            return Result<void, Sync.Error>.failure(Sync.failure(
+                Sync.ErrorKind.message_limit,
+                "sync.netcode.send",
+                Network.format_endpoint(destination),
+                "datagram payload exceeds maximum_payload_bytes"
+            ))
+        }
+        if var transport = self.socket {
+            let header = encode_header(channel, sequence, payload.count())
+            var index = 0
+            while index < header.count() {
+                self.send_buffer[index] = header[index]
+                index++
+            }
+            index = 0
+            while index < payload.count() {
+                self.send_buffer[16 + index] = payload[index]
+                index++
+            }
+            let bytes = @self.send_buffer[0:16 + payload.count()]
+            match UDP.send_to(transport, bytes, destination) {
+                success => { return Result<void, Sync.Error>.success() }
+                failure(error) => { return Result<void, Sync.Error>.failure(
+                    Sync.network_failure("sync.netcode.send", error)
+                ) }
+            }
+        }
+        return Result<void, Sync.Error>.failure(closed_error("sync.netcode.send"))
+    }
+
+    func receive() Result<Datagram, Sync.Error> {
+        var received:WireReceived? = null
+        match self.receive_wire() {
+            success(value) => { received = value }
+            failure(error) => { return Result<Datagram, Sync.Error>.failure(error) }
+        }
+        if let wire = received {
+            var payload:uint8[] = []
+            var index = 0
+            while index < wire.payload_bytes {
+                payload.append(self.receive_buffer[16 + index])
+                index++
+            }
+            return Result<Datagram, Sync.Error>.success(Datagram(
+                sender:wire.sender,
+                channel:wire.channel,
+                sequence:wire.sequence,
+                payload:payload
+            ))
+        }
+        panic("Sync Netcode receive completed without metadata")
+    }
+
+    func receive_into(output:&uint8[..]) Result<Received, Sync.Error> {
+        var received:WireReceived? = null
+        match self.receive_wire() {
+            success(value) => { received = value }
+            failure(error) => { return Result<Received, Sync.Error>.failure(error) }
+        }
+        if let wire = received {
+            if wire.payload_bytes > output.count() {
+                return Result<Received, Sync.Error>.failure(Sync.failure(
+                    Sync.ErrorKind.message_limit,
+                    "sync.netcode.receive_into",
+                    Network.format_endpoint(wire.sender),
+                    "received payload exceeds the supplied output buffer"
+                ))
+            }
+            var index = 0
+            while index < wire.payload_bytes {
+                output[index] = self.receive_buffer[16 + index]
+                index++
+            }
+            return Result<Received, Sync.Error>.success(Received(
+                sender:wire.sender,
+                channel:wire.channel,
+                sequence:wire.sequence,
+                payload_bytes:wire.payload_bytes
+            ))
+        }
+        panic("Sync Netcode receive completed without metadata")
+    }
+
+    func close() Result<void, Sync.Error> {
+        if var transport = self.socket {
+            self.socket = null
+            match UDP.close(move transport) {
+                success => { return Result<void, Sync.Error>.success() }
+                failure(error) => { return Result<void, Sync.Error>.failure(
+                    Sync.network_failure("sync.netcode.close", error)
+                ) }
+            }
+        }
+        return Result<void, Sync.Error>.success()
+    }
+
+    private func receive_wire() Result<WireReceived, Sync.Error> {
+        if var transport = self.socket {
+            var buffer = self.receive_buffer
+            var udp_result:UDP.Receive? = null
+            match receive_udp(transport, &buffer[0:buffer.count()]) {
+                success(value) => { udp_result = value }
+                failure(error) => {
+                    return Result<WireReceived, Sync.Error>.failure(error)
+                }
+            }
+            self.receive_buffer = buffer
+            if let received = udp_result {
+                if received.truncated {
+                    return Result<WireReceived, Sync.Error>.failure(Sync.failure(
+                        Sync.ErrorKind.message_limit,
+                        "sync.netcode.receive",
+                        Network.format_endpoint(received.sender),
+                        "received datagram exceeds maximum_payload_bytes"
+                    ))
+                }
+                var decoded:FrameHeader? = null
+                match decode_header(@self.receive_buffer[0:received.count]) {
+                    success(value) => { decoded = value }
+                    failure(error) => {
+                        return Result<WireReceived, Sync.Error>.failure(error)
+                    }
+                }
+                if let header = decoded {
+                    if header.payload_bytes > self.options.maximum_payload_bytes {
+                        return Result<WireReceived, Sync.Error>.failure(Sync.failure(
+                            Sync.ErrorKind.message_limit,
+                            "sync.netcode.receive",
+                            Network.format_endpoint(received.sender),
+                            "peer declared a datagram larger than maximum_payload_bytes"
+                        ))
+                    }
+                    if received.count != 16 + header.payload_bytes {
+                        return Result<WireReceived, Sync.Error>.failure(Sync.failure(
+                            Sync.ErrorKind.malformed_message,
+                            "sync.netcode.receive",
+                            Network.format_endpoint(received.sender),
+                            "datagram size does not match its declared payload length"
+                        ))
+                    }
+                    return Result<WireReceived, Sync.Error>.success(WireReceived(
+                        sender:received.sender,
+                        channel:header.channel,
+                        sequence:header.sequence,
+                        payload_bytes:header.payload_bytes
+                    ))
+                }
+            }
+            panic("Sync Netcode receive completed without wire metadata")
+        }
+        return Result<WireReceived, Sync.Error>.failure(closed_error("sync.netcode.receive"))
+    }
+
+    drop { match self.close() { success => {}; failure(error) => {} } }
+}
+
+public func bind(host:str, port:uint16) Result<Host, Sync.Error> {
+    return bind(host, port, default_options())
+}
+
+public func bind(host:str, port:uint16, options:Options) Result<Host, Sync.Error> {
+    var address = Network.IpAddress.ipv4([0, 0, 0, 0])
+    match Network.parse_ip(host) {
+        success(value) => { address = value }
+        failure(error) => {
+            return Result<Host, Sync.Error>.failure(Sync.failure(
+                Sync.ErrorKind.invalid_configuration,
+                "sync.netcode.bind",
+                host,
+                "host must be a numeric IPv4 or IPv6 address"
+            ))
+        }
+    }
+    return bind_endpoint(Network.Endpoint(address:address, port:port, scope_id:0), options)
+}
+
+public func bind_endpoint(endpoint:Network.Endpoint) Result<Host, Sync.Error> {
+    return bind_endpoint(endpoint, default_options())
+}
+
+public func bind_endpoint(endpoint:Network.Endpoint, options:Options) Result<Host, Sync.Error> {
+    try validate_options(options)
+    match UDP.bind(endpoint, udp_options(options)) {
+        success(socket) => { return Result<Host, Sync.Error>.success(Host(socket, options)) }
+        failure(error) => { return Result<Host, Sync.Error>.failure(
+            Sync.network_failure("sync.netcode.bind", error)
+        ) }
+    }
+}
+
+public func open(family:Network.Family) Result<Host, Sync.Error> {
+    return open(family, default_options())
+}
+
+public func open(family:Network.Family, options:Options) Result<Host, Sync.Error> {
+    try validate_options(options)
+    if family == Network.Family.any {
+        return Result<Host, Sync.Error>.failure(Sync.failure(
+            Sync.ErrorKind.invalid_configuration,
+            "sync.netcode.open",
+            null,
+            "Netcode host requires a concrete IPv4 or IPv6 family"
+        ))
+    }
+    match UDP.open(family, udp_options(options)) {
+        success(socket) => { return Result<Host, Sync.Error>.success(Host(socket, options)) }
+        failure(error) => { return Result<Host, Sync.Error>.failure(
+            Sync.network_failure("sync.netcode.open", error)
+        ) }
+    }
+}
+
+package struct FrameHeader {
+    let channel:uint16
+    let sequence:uint32
+    let payload_bytes:int
+}
+
+package struct WireReceived {
+    let sender:Network.Endpoint
+    let channel:uint16
+    let sequence:uint32
+    let payload_bytes:int
+}
+
+package func encode_header(channel:uint16, sequence:uint32, payload_bytes:int) uint8[16] {
+    let length = payload_bytes as uint16
+    var result:uint8[16]
+    result[0] = 83
+    result[1] = 89
+    result[2] = 78
+    result[3] = 67
+    result[4] = 1
+    result[5] = 1
+    result[6] = (channel >> 8) as uint8
+    result[7] = (channel & 255) as uint8
+    result[8] = (sequence >> 24) as uint8
+    result[9] = ((sequence >> 16) & 255) as uint8
+    result[10] = ((sequence >> 8) & 255) as uint8
+    result[11] = (sequence & 255) as uint8
+    result[12] = (length >> 8) as uint8
+    result[13] = (length & 255) as uint8
+    result[14] = 0
+    result[15] = 0
+    return result
+}
+
+package func decode_header(bytes:@uint8[..]) Result<FrameHeader, Sync.Error> {
+    if bytes.count() < 16 {
+        return Result<FrameHeader, Sync.Error>.failure(Sync.failure(
+            Sync.ErrorKind.malformed_message,
+            "sync.netcode.receive",
+            null,
+            "Sync Netcode datagram must contain a 16-byte header"
+        ))
+    }
+    if bytes[0] != 83 || bytes[1] != 89 || bytes[2] != 78 || bytes[3] != 67 {
+        return Result<FrameHeader, Sync.Error>.failure(Sync.failure(
+            Sync.ErrorKind.malformed_message,
+            "sync.netcode.receive",
+            null,
+            "peer sent a datagram with an invalid Sync signature"
+        ))
+    }
+    if bytes[4] != 1 {
+        return Result<FrameHeader, Sync.Error>.failure(Sync.failure(
+            Sync.ErrorKind.unsupported_version,
+            "sync.netcode.receive",
+            null,
+            "peer uses an unsupported Sync Netcode protocol version"
+        ))
+    }
+    if bytes[5] != 1 || bytes[14] != 0 || bytes[15] != 0 {
+        return Result<FrameHeader, Sync.Error>.failure(Sync.failure(
+            Sync.ErrorKind.malformed_message,
+            "sync.netcode.receive",
+            null,
+            "peer sent an invalid Sync Netcode datagram kind or reserved flags"
+        ))
+    }
+    let channel = ((bytes[6] as uint16) << 8) + bytes[7] as uint16
+    let sequence:uint32 =
+        ((bytes[8] as uint32) << 24) +
+        ((bytes[9] as uint32) << 16) +
+        ((bytes[10] as uint32) << 8) +
+        bytes[11] as uint32
+    let payload_bytes = (((bytes[12] as uint16) << 8) + bytes[13] as uint16) as int
+    return Result<FrameHeader, Sync.Error>.success(FrameHeader(
+        channel:channel,
+        sequence:sequence,
+        payload_bytes:payload_bytes
+    ))
+}
+
+func validate_options(options:Options) Result<void, Sync.Error> {
+    if options.maximum_payload_bytes <= 0 || options.maximum_payload_bytes > 65_000 {
+        return Result<void, Sync.Error>.failure(Sync.failure(
+            Sync.ErrorKind.invalid_configuration,
+            "sync.netcode.options",
+            null,
+            "maximum_payload_bytes must be between 1 and 65000"
+        ))
+    }
+    try validate_timeout(options.read_timeout_milliseconds, "read")
+    try validate_timeout(options.write_timeout_milliseconds, "write")
+    return Result<void, Sync.Error>.success()
+}
+
+func validate_timeout(value:int?, name:str) Result<void, Sync.Error> {
+    if let milliseconds = value {
+        if milliseconds < 0 {
+            return Result<void, Sync.Error>.failure(Sync.failure(
+                Sync.ErrorKind.invalid_configuration,
+                "sync.netcode.options",
+                name,
+                "Netcode timeout must be non-negative"
+            ))
+        }
+    }
+    return Result<void, Sync.Error>.success()
+}
+
+func udp_options(options:Options) UDP.Options {
+    return UDP.Options(
+        read_timeout_milliseconds:options.read_timeout_milliseconds,
+        write_timeout_milliseconds:options.write_timeout_milliseconds
+    )
+}
+
+func receive_udp(
+    socket:&UDP.Socket,
+    buffer:&uint8[..]
+) Result<UDP.Receive, Sync.Error> {
+    match UDP.receive_from(socket, buffer) {
+        success(value) => { return Result<UDP.Receive, Sync.Error>.success(value) }
+        failure(error) => { return Result<UDP.Receive, Sync.Error>.failure(
+            Sync.network_failure("sync.netcode.receive", error)
+        ) }
+    }
+}
+
+func byte_buffer(count:int) uint8[] {
+    var result:uint8[] = []
+    var index = 0
+    while index < count {
+        result.append(0 as uint8)
+        index++
+    }
+    return result
+}
+
+func closed_error(operation:str) Sync.Error {
+    return Sync.failure(Sync.ErrorKind.closed, operation, null, "Sync Netcode host is closed")
+}
