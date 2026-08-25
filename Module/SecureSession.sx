@@ -1,0 +1,715 @@
+use Sync
+use Sync.Session
+use Sync.SecureSession.Crypto
+use STD.Crypto as StandardCrypto
+use STD.Network
+use STD.Text.UTF8
+
+public struct SharedKey {
+    private let bytes:uint8[32]
+
+    package init() {
+        self.bytes = [
+            0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0
+        ]
+    }
+    package init(value:uint8[32]) { self.bytes = value }
+
+    func text() str {
+        var encoded:uint8[] = [115, 121, 110, 99, 49, 95]
+        for byte in self.bytes {
+            encoded.append(hex_digit(byte >> 4))
+            encoded.append(hex_digit(byte & 15))
+        }
+        match UTF8.decode(@encoded[0:encoded.count()]) {
+            success(value) => { return value }
+            failure(error) => { panic("Sync secure key encoding produced invalid UTF-8") }
+        }
+        panic("Sync secure key encoding result was not handled")
+    }
+
+    package func material() uint8[32] { return self.bytes }
+}
+
+public func generate_key() SharedKey {
+    let random = StandardCrypto.random_bytes(32)
+    var bytes:uint8[32]
+    var index = 0
+    while index < 32 {
+        bytes[index] = random[index]
+        index++
+    }
+    return SharedKey(bytes)
+}
+
+public func parse_key(text:str) Result<SharedKey, Sync.Error> {
+    let encoded = UTF8.bytes(text)
+    if encoded.count() != 70 ||
+        encoded[0] != 115 || encoded[1] != 121 || encoded[2] != 110 ||
+        encoded[3] != 99 || encoded[4] != 49 || encoded[5] != 95 {
+        return Result<SharedKey, Sync.Error>.failure(invalid_key_error(
+            "shared key must use the sync1_ prefix followed by 64 hexadecimal characters"
+        ))
+    }
+    var bytes:uint8[32]
+    var index = 0
+    while index < 32 {
+        let high = hex_value(encoded[6 + index * 2])
+        let low = hex_value(encoded[7 + index * 2])
+        if high < 0 || low < 0 {
+            return Result<SharedKey, Sync.Error>.failure(invalid_key_error(
+                "shared key contains a non-hexadecimal character"
+            ))
+        }
+        bytes[index] = (high * 16 + low) as uint8
+        index++
+    }
+    return Result<SharedKey, Sync.Error>.success(SharedKey(bytes))
+}
+
+public func default_options() Session.Options { return Session.default_options() }
+
+public class Connection {
+    private var transport:Session.Connection?
+    private let send_key:uint8[32]
+    private let receive_key:uint8[32]
+    private let send_direction:uint8
+    private let receive_direction:uint8
+    private let message_limit:int
+    private var send_sequence:uint64
+    private var receive_sequence:uint64
+
+    package init(
+        transport:Session.Connection,
+        send_key:uint8[32],
+        receive_key:uint8[32],
+        send_direction:uint8,
+        receive_direction:uint8,
+        maximum_message_bytes:int
+    ) {
+        self.transport = transport
+        self.send_key = send_key
+        self.receive_key = receive_key
+        self.send_direction = send_direction
+        self.receive_direction = receive_direction
+        self.message_limit = maximum_message_bytes
+        self.send_sequence = 1
+        self.receive_sequence = 1
+    }
+
+    func is_closed() bool { return self.transport == null }
+
+    func send(channel:uint16, payload:@uint8[..]) Result<void, Sync.Error> {
+        if payload.count() > self.message_limit {
+            return Result<void, Sync.Error>.failure(Sync.failure(
+                Sync.ErrorKind.message_limit,
+                "sync.secure.send",
+                null,
+                "message payload exceeds maximum_message_bytes"
+            ))
+        }
+        if self.send_sequence == maximum_sequence() {
+            self.invalidate()
+            return Result<void, Sync.Error>.failure(Sync.failure(
+                Sync.ErrorKind.resource_limit,
+                "sync.secure.send",
+                null,
+                "secure message sequence is exhausted; establish a new session"
+            ))
+        }
+        if var connection = self.transport {
+            let nonce = message_nonce(self.send_direction, self.send_sequence)
+            let associated = message_associated(channel, self.send_sequence)
+            let sealed = try Crypto.seal(
+                @self.send_key[0:32],
+                @nonce[0:12],
+                @associated[0:16],
+                payload
+            )
+            match connection.send(channel, @sealed[0:sealed.count()]) {
+                success => {
+                    self.send_sequence++
+                    return Result<void, Sync.Error>.success()
+                }
+                failure(error) => {
+                    self.invalidate()
+                    return Result<void, Sync.Error>.failure(error)
+                }
+            }
+        }
+        return Result<void, Sync.Error>.failure(closed_error("sync.secure.send"))
+    }
+
+    func send_text(channel:uint16, text:str) Result<void, Sync.Error> {
+        let bytes = UTF8.bytes(text)
+        return self.send(channel, @bytes[0:bytes.count()])
+    }
+
+    func receive() Result<Sync.Message, Sync.Error> {
+        if self.receive_sequence == maximum_sequence() {
+            self.invalidate()
+            return Result<Sync.Message, Sync.Error>.failure(Sync.failure(
+                Sync.ErrorKind.resource_limit,
+                "sync.secure.receive",
+                null,
+                "secure message sequence is exhausted; establish a new session"
+            ))
+        }
+        if var connection = self.transport {
+            var received:Sync.Message? = null
+            match connection.receive() {
+                failure(error) => {
+                    self.invalidate()
+                    return Result<Sync.Message, Sync.Error>.failure(error)
+                }
+                success(message) => { received = message }
+            }
+            if let message = received {
+                if message.payload.count() < 16 || message.payload.count() > self.message_limit + 16 {
+                    self.invalidate()
+                    return Result<Sync.Message, Sync.Error>.failure(Sync.failure(
+                        Sync.ErrorKind.message_limit,
+                        "sync.secure.receive",
+                        null,
+                        "encrypted message exceeds the configured plaintext limit"
+                    ))
+                }
+                let nonce = message_nonce(self.receive_direction, self.receive_sequence)
+                let associated = message_associated(message.channel, self.receive_sequence)
+                match Crypto.open(
+                    @self.receive_key[0:32],
+                    @nonce[0:12],
+                    @associated[0:16],
+                    @message.payload[0:message.payload.count()]
+                ) {
+                    failure(error) => {
+                        self.invalidate()
+                        return Result<Sync.Message, Sync.Error>.failure(error)
+                    }
+                    success(payload) => {
+                        self.receive_sequence++
+                        return Result<Sync.Message, Sync.Error>.success(Sync.Message(
+                            channel:message.channel,
+                            payload:payload
+                        ))
+                    }
+                }
+            }
+        }
+        return Result<Sync.Message, Sync.Error>.failure(closed_error("sync.secure.receive"))
+    }
+
+    func local_endpoint() Result<Network.Endpoint, Sync.Error> {
+        if var connection = self.transport { return connection.local_endpoint() }
+        return Result<Network.Endpoint, Sync.Error>.failure(closed_error(
+            "sync.secure.local_endpoint"
+        ))
+    }
+
+    func peer_endpoint() Result<Network.Endpoint, Sync.Error> {
+        if var connection = self.transport { return connection.peer_endpoint() }
+        return Result<Network.Endpoint, Sync.Error>.failure(closed_error(
+            "sync.secure.peer_endpoint"
+        ))
+    }
+
+    func close() Result<void, Sync.Error> {
+        if var connection = self.transport {
+            self.transport = null
+            return connection.close()
+        }
+        return Result<void, Sync.Error>.success()
+    }
+
+    private func invalidate() { match self.close() { success => {}; failure(error) => {} } }
+
+    drop { self.invalidate() }
+}
+
+public class Listener {
+    private var transport:Session.Listener?
+    private let key:SharedKey
+    private let options:Session.Options
+
+    package init(transport:Session.Listener, key:SharedKey, options:Session.Options) {
+        self.transport = transport
+        self.key = key
+        self.options = options
+    }
+
+    func is_closed() bool { return self.transport == null }
+
+    func local_endpoint() Result<Network.Endpoint, Sync.Error> {
+        if var listener = self.transport { return listener.local_endpoint() }
+        return Result<Network.Endpoint, Sync.Error>.failure(closed_error(
+            "sync.secure.listener_endpoint"
+        ))
+    }
+
+    func accept() Result<Connection, Sync.Error> {
+        if var listener = self.transport {
+            match listener.accept() {
+                failure(error) => { return Result<Connection, Sync.Error>.failure(error) }
+                success(connection) => {
+                    return finish_server_handshake(connection, self.key, self.options.maximum_message_bytes)
+                }
+            }
+        }
+        return Result<Connection, Sync.Error>.failure(closed_error("sync.secure.accept"))
+    }
+
+    func close() Result<void, Sync.Error> {
+        if var listener = self.transport {
+            self.transport = null
+            return listener.close()
+        }
+        return Result<void, Sync.Error>.success()
+    }
+
+    drop { match self.close() { success => {}; failure(error) => {} } }
+}
+
+public func connect(host:str, port:uint16, key:SharedKey) Result<Connection, Sync.Error> {
+    return connect(host, port, key, default_options())
+}
+
+public func connect(
+    host:str,
+    port:uint16,
+    key:SharedKey,
+    options:Session.Options
+) Result<Connection, Sync.Error> {
+    let transport_policy = try encrypted_transport_options(options)
+    match Session.connect(host, port, transport_policy) {
+        failure(error) => { return Result<Connection, Sync.Error>.failure(error) }
+        success(connection) => {
+            return finish_client_handshake(connection, key, options.maximum_message_bytes)
+        }
+    }
+}
+
+public func connect_endpoint(
+    endpoint:Network.Endpoint,
+    key:SharedKey
+) Result<Connection, Sync.Error> {
+    return connect_endpoint(endpoint, key, default_options())
+}
+
+public func connect_endpoint(
+    endpoint:Network.Endpoint,
+    key:SharedKey,
+    options:Session.Options
+) Result<Connection, Sync.Error> {
+    let transport_policy = try encrypted_transport_options(options)
+    match Session.connect_endpoint(endpoint, transport_policy) {
+        failure(error) => { return Result<Connection, Sync.Error>.failure(error) }
+        success(connection) => {
+            return finish_client_handshake(connection, key, options.maximum_message_bytes)
+        }
+    }
+}
+
+public func listen(
+    host:str,
+    port:uint16,
+    key:SharedKey
+) Result<Listener, Sync.Error> {
+    return listen(host, port, key, default_options())
+}
+
+public func listen(
+    host:str,
+    port:uint16,
+    key:SharedKey,
+    options:Session.Options
+) Result<Listener, Sync.Error> {
+    let transport_policy = try encrypted_transport_options(options)
+    match Session.listen(host, port, transport_policy) {
+        failure(error) => { return Result<Listener, Sync.Error>.failure(error) }
+        success(listener) => {
+            return Result<Listener, Sync.Error>.success(Listener(listener, key, options))
+        }
+    }
+}
+
+public func listen_endpoint(
+    endpoint:Network.Endpoint,
+    key:SharedKey
+) Result<Listener, Sync.Error> {
+    return listen_endpoint(endpoint, key, default_options())
+}
+
+public func listen_endpoint(
+    endpoint:Network.Endpoint,
+    key:SharedKey,
+    options:Session.Options
+) Result<Listener, Sync.Error> {
+    let transport_policy = try encrypted_transport_options(options)
+    match Session.listen_endpoint(endpoint, transport_policy) {
+        failure(error) => { return Result<Listener, Sync.Error>.failure(error) }
+        success(listener) => {
+            return Result<Listener, Sync.Error>.success(Listener(listener, key, options))
+        }
+    }
+}
+
+struct Negotiated {
+    let client_to_server:uint8[32]
+    let server_to_client:uint8[32]
+}
+
+func finish_client_handshake(
+    connection:Session.Connection,
+    key:SharedKey,
+    message_limit:int
+) Result<Connection, Sync.Error> {
+    match client_handshake(connection, key) {
+        success(keys) => {
+            return Result<Connection, Sync.Error>.success(Connection(
+                connection,
+                keys.client_to_server,
+                keys.server_to_client,
+                1,
+                2,
+                message_limit
+            ))
+        }
+        failure(error) => {
+            close_transport(connection)
+            return Result<Connection, Sync.Error>.failure(error)
+        }
+    }
+}
+
+func finish_server_handshake(
+    connection:Session.Connection,
+    key:SharedKey,
+    message_limit:int
+) Result<Connection, Sync.Error> {
+    match server_handshake(connection, key) {
+        success(keys) => {
+            return Result<Connection, Sync.Error>.success(Connection(
+                connection,
+                keys.server_to_client,
+                keys.client_to_server,
+                2,
+                1,
+                message_limit
+            ))
+        }
+        failure(error) => {
+            close_transport(connection)
+            return Result<Connection, Sync.Error>.failure(error)
+        }
+    }
+}
+
+func client_handshake(
+    connection:Session.Connection,
+    key:SharedKey
+) Result<Negotiated, Sync.Error> {
+    let pair = ephemeral_key_pair()
+    let nonce = random_fixed(16)
+    let hello = encode_hello(1, @nonce[0:16], @pair.public_key[0:32])
+    try connection.send(65_535, @hello[0:hello.count()])
+
+    let response = try connection.receive()
+    try validate_handshake_message(response, 2, 72)
+    let server_nonce = fixed16(@response.payload[8:24])
+    let server_public = fixed32(@response.payload[24:56])
+    let server_base = copy_bytes(@response.payload[0:56])
+    let server_proof = copy_bytes(@response.payload[56:72])
+    let shared = try Crypto.shared_secret(@pair.secret[0:32], @server_public[0:32])
+    let keys = try derive_keys(shared, key, nonce, server_nonce)
+    let transcript = joined(@hello[0:hello.count()], @server_base[0:server_base.count()])
+    let server_associated = proof_associated(@transcript[0:transcript.count()], 2)
+    let server_proof_nonce = message_nonce(2, 0)
+    let opened = try Crypto.open(
+        @keys.server_to_client[0:32],
+        @server_proof_nonce[0:12],
+        @server_associated[0:server_associated.count()],
+        @server_proof[0:server_proof.count()]
+    )
+    if !opened.is_empty() {
+        return Result<Negotiated, Sync.Error>.failure(handshake_error(
+            "server key confirmation carried unexpected plaintext"
+        ))
+    }
+
+    let client_context = joined(@transcript[0:transcript.count()], @server_proof[0:server_proof.count()])
+    let client_associated = proof_associated(@client_context[0:client_context.count()], 3)
+    let client_proof_nonce = message_nonce(1, 0)
+    let empty:uint8[] = []
+    let client_proof = try Crypto.seal(
+        @keys.client_to_server[0:32],
+        @client_proof_nonce[0:12],
+        @client_associated[0:client_associated.count()],
+        @empty[0:0]
+    )
+    let finish = encode_finish(@client_proof[0:client_proof.count()])
+    try connection.send(65_535, @finish[0:finish.count()])
+    return Result<Negotiated, Sync.Error>.success(keys)
+}
+
+func server_handshake(
+    connection:Session.Connection,
+    key:SharedKey
+) Result<Negotiated, Sync.Error> {
+    let request = try connection.receive()
+    try validate_handshake_message(request, 1, 56)
+    let client_nonce = fixed16(@request.payload[8:24])
+    let client_public = fixed32(@request.payload[24:56])
+    let pair = ephemeral_key_pair()
+    let server_nonce = random_fixed(16)
+    let shared = try Crypto.shared_secret(@pair.secret[0:32], @client_public[0:32])
+    let keys = try derive_keys(shared, key, client_nonce, server_nonce)
+    let server_base = encode_hello(2, @server_nonce[0:16], @pair.public_key[0:32])
+    let transcript = joined(
+        @request.payload[0:request.payload.count()],
+        @server_base[0:server_base.count()]
+    )
+    let server_associated = proof_associated(@transcript[0:transcript.count()], 2)
+    let server_proof_nonce = message_nonce(2, 0)
+    let empty:uint8[] = []
+    let server_proof = try Crypto.seal(
+        @keys.server_to_client[0:32],
+        @server_proof_nonce[0:12],
+        @server_associated[0:server_associated.count()],
+        @empty[0:0]
+    )
+    let response = joined(@server_base[0:server_base.count()], @server_proof[0:server_proof.count()])
+    try connection.send(65_535, @response[0:response.count()])
+
+    let finish = try connection.receive()
+    try validate_handshake_message(finish, 3, 24)
+    let client_context = joined(@transcript[0:transcript.count()], @server_proof[0:server_proof.count()])
+    let client_associated = proof_associated(@client_context[0:client_context.count()], 3)
+    let client_proof_nonce = message_nonce(1, 0)
+    let opened = try Crypto.open(
+        @keys.client_to_server[0:32],
+        @client_proof_nonce[0:12],
+        @client_associated[0:client_associated.count()],
+        @finish.payload[8:24]
+    )
+    if !opened.is_empty() {
+        return Result<Negotiated, Sync.Error>.failure(handshake_error(
+            "client key confirmation carried unexpected plaintext"
+        ))
+    }
+    return Result<Negotiated, Sync.Error>.success(keys)
+}
+
+func ephemeral_key_pair() Crypto.KeyPair {
+    while true {
+        let seed = StandardCrypto.random_bytes(32)
+        match Crypto.key_pair(@seed[0:seed.count()]) {
+            success(value) => { return value }
+            failure(error) => {}
+        }
+    }
+    panic("ephemeral key generation loop terminated unexpectedly")
+}
+
+func derive_keys(
+    shared:uint8[32],
+    key:SharedKey,
+    client_nonce:uint8[16],
+    server_nonce:uint8[16]
+) Result<Negotiated, Sync.Error> {
+    let key_material = key.material()
+    var input:uint8[] = []
+    for byte in shared { input.append(byte) }
+    for byte in key_material { input.append(byte) }
+    var salt:uint8[] = []
+    for byte in client_nonce { salt.append(byte) }
+    for byte in server_nonce { salt.append(byte) }
+    let context = UTF8.bytes("Silex Sync SecureSession v1")
+    let output = try Crypto.derive(
+        @input[0:input.count()],
+        @salt[0:salt.count()],
+        @context[0:context.count()],
+        64
+    )
+    return Result<Negotiated, Sync.Error>.success(Negotiated(
+        client_to_server:fixed32(@output[0:32]),
+        server_to_client:fixed32(@output[32:64])
+    ))
+}
+
+func encode_hello(kind:uint8, nonce:@uint8[..], public_key:@uint8[..]) uint8[] {
+    var output:uint8[] = [83, 83, 89, 78, 1, kind, 0, 0]
+    for byte in nonce { output.append(byte) }
+    for byte in public_key { output.append(byte) }
+    return output
+}
+
+func encode_finish(proof:@uint8[..]) uint8[] {
+    var output:uint8[] = [83, 83, 89, 78, 1, 3, 0, 0]
+    for byte in proof { output.append(byte) }
+    return output
+}
+
+func validate_handshake_message(
+    message:@Sync.Message,
+    kind:uint8,
+    count:int
+) Result<void, Sync.Error> {
+    if message.channel != 65_535 || message.payload.count() != count {
+        return Result<void, Sync.Error>.failure(handshake_error(
+            "peer sent an unexpected secure handshake frame"
+        ))
+    }
+    if message.payload[0] != 83 || message.payload[1] != 83 ||
+        message.payload[2] != 89 || message.payload[3] != 78 {
+        return Result<void, Sync.Error>.failure(handshake_error(
+            "peer sent an invalid secure handshake signature"
+        ))
+    }
+    if message.payload[4] != 1 {
+        return Result<void, Sync.Error>.failure(Sync.failure(
+            Sync.ErrorKind.unsupported_version,
+            "sync.secure.handshake",
+            null,
+            "peer uses an unsupported SecureSession protocol version"
+        ))
+    }
+    if message.payload[5] != kind || message.payload[6] != 0 || message.payload[7] != 0 {
+        return Result<void, Sync.Error>.failure(handshake_error(
+            "peer sent an unexpected secure handshake step or reserved flags"
+        ))
+    }
+    return Result<void, Sync.Error>.success()
+}
+
+func encrypted_transport_options(options:Session.Options) Result<Session.Options, Sync.Error> {
+    if options.maximum_message_bytes <= 0 || options.maximum_message_bytes > 16 * 1024 * 1024 - 16 {
+        return Result<Session.Options, Sync.Error>.failure(Sync.failure(
+            Sync.ErrorKind.invalid_configuration,
+            "sync.secure.options",
+            null,
+            "maximum_message_bytes must be between 1 and 16777200 for encrypted sessions"
+        ))
+    }
+    var transport_limit = options.maximum_message_bytes + 16
+    if transport_limit < 72 { transport_limit = 72 }
+    return Result<Session.Options, Sync.Error>.success(Session.Options(
+        maximum_message_bytes:transport_limit,
+        backlog:options.backlog,
+        connect_timeout_milliseconds:options.connect_timeout_milliseconds,
+        accept_timeout_milliseconds:options.accept_timeout_milliseconds,
+        read_timeout_milliseconds:options.read_timeout_milliseconds,
+        write_timeout_milliseconds:options.write_timeout_milliseconds
+    ))
+}
+
+func message_nonce(direction:uint8, sequence:uint64) uint8[12] {
+    var output:uint8[12]
+    output[0] = 0
+    output[1] = 0
+    output[2] = 0
+    output[3] = direction
+    write_uint64(&output[0:12], 4, sequence)
+    return output
+}
+
+func maximum_sequence() uint64 {
+    return (4_294_967_295 as uint64 << 32) + 4_294_967_295 as uint64
+}
+
+func message_associated(channel:uint16, sequence:uint64) uint8[16] {
+    var output:uint8[16]
+    output[0] = 83
+    output[1] = 83
+    output[2] = 69
+    output[3] = 67
+    output[4] = 1
+    output[5] = 0
+    output[6] = (channel >> 8) as uint8
+    output[7] = (channel & 255) as uint8
+    write_uint64(&output[0:16], 8, sequence)
+    return output
+}
+
+func proof_associated(transcript:@uint8[..], role:uint8) uint8[] {
+    var output = copy_bytes(transcript)
+    output.append(role)
+    return output
+}
+
+func write_uint64(output:&uint8[..], offset:int, value:uint64) {
+    var index = 0
+    while index < 8 {
+        let shift = (7 - index) * 8
+        output[offset + index] = ((value >> shift) & 255) as uint8
+        index++
+    }
+}
+
+func random_fixed(count:int) uint8[16] {
+    if count != 16 { panic("secure nonce helper requires 16 bytes") }
+    let random = StandardCrypto.random_bytes(count)
+    return fixed16(@random[0:random.count()])
+}
+
+func fixed16(bytes:@uint8[..]) uint8[16] {
+    var output:uint8[16]
+    var index = 0
+    while index < 16 {
+        output[index] = bytes[index]
+        index++
+    }
+    return output
+}
+
+func fixed32(bytes:@uint8[..]) uint8[32] {
+    var output:uint8[32]
+    var index = 0
+    while index < 32 {
+        output[index] = bytes[index]
+        index++
+    }
+    return output
+}
+
+func copy_bytes(bytes:@uint8[..]) uint8[] {
+    var output:uint8[] = []
+    for byte in bytes { output.append(byte) }
+    return output
+}
+
+func joined(left:@uint8[..], right:@uint8[..]) uint8[] {
+    var output = copy_bytes(left)
+    for byte in right { output.append(byte) }
+    return output
+}
+
+func hex_digit(value:uint8) uint8 {
+    if value < 10 { return value + 48 }
+    return value - 10 + 97
+}
+
+func hex_value(value:uint8) int {
+    if value >= 48 && value <= 57 { return (value - 48) as int }
+    if value >= 97 && value <= 102 { return (value - 97 + 10) as int }
+    if value >= 65 && value <= 70 { return (value - 65 + 10) as int }
+    return -1
+}
+
+func invalid_key_error(detail:str) Sync.Error {
+    return Sync.failure(Sync.ErrorKind.invalid_key, "sync.secure.key", null, detail)
+}
+
+func handshake_error(detail:str) Sync.Error {
+    return Sync.failure(Sync.ErrorKind.handshake, "sync.secure.handshake", null, detail)
+}
+
+func closed_error(operation:str) Sync.Error {
+    return Sync.failure(Sync.ErrorKind.closed, operation, null, "Sync secure session is closed")
+}
+
+func close_transport(connection:Session.Connection) {
+    match connection.close() { success => {}; failure(error) => {} }
+}

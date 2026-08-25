@@ -11,6 +11,10 @@ public enum ErrorKind {
     message_limit
     resource_limit
     invalid_text
+    invalid_key
+    handshake
+    authentication
+    cryptography
 }
 
 public struct Error {

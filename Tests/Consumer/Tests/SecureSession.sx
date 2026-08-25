@@ -1,0 +1,124 @@
+use Sync
+use Sync.SecureSession
+use STD.Threading
+
+func require_connection(
+    result:Result<SecureSession.Connection, Sync.Error>
+) SecureSession.Connection {
+    match result {
+        success(value) => { return value }
+        failure(error) => { panic(error.detail) }
+    }
+    panic("secure connection result was not handled")
+}
+
+func require_listener(
+    result:Result<SecureSession.Listener, Sync.Error>
+) SecureSession.Listener {
+    match result {
+        success(value) => { return value }
+        failure(error) => { panic(error.detail) }
+    }
+    panic("secure listener result was not handled")
+}
+
+func require_message(result:Result<Sync.Message, Sync.Error>) Sync.Message {
+    match result {
+        success(value) => { return value }
+        failure(error) => { panic(error.detail) }
+    }
+    panic("secure message result was not handled")
+}
+
+func require_endpoint<T>(result:Result<T, Sync.Error>) T {
+    match result {
+        success(value) => { return value }
+        failure(error) => { panic(error.detail) }
+    }
+    panic("secure endpoint result was not handled")
+}
+
+func require_shared_key(
+    result:Result<SecureSession.SharedKey, Sync.Error>
+) SecureSession.SharedKey {
+    match result {
+        success(value) => { return value }
+        failure(error) => { panic(error.detail) }
+    }
+    panic("secure shared key result was not handled")
+}
+
+func serve_secure_chat(listener:SecureSession.Listener) {
+    var connection = require_connection(listener.accept())
+    let incoming = require_message(connection.receive())
+    assert(incoming.channel == 7)
+    match incoming.text() {
+        success(text) => { assert(text == "hello securely") }
+        failure(error) => { panic(error.detail) }
+    }
+    match connection.send_text(8, "welcome securely") {
+        success => {}
+        failure(error) => { panic(error.detail) }
+    }
+}
+
+struct SecureChatServer:Threading.Job {
+    var listener:SecureSession.Listener
+    func execute() { serve_secure_chat(self.listener) }
+}
+
+struct RejectingSecureServer:Threading.Job {
+    var listener:SecureSession.Listener
+    var rejected:bool
+
+    func execute() { self.rejected = reject_secure_peer(self.listener) }
+}
+
+func reject_secure_peer(listener:SecureSession.Listener) bool {
+    match listener.accept() {
+        success(connection) => { return false }
+        failure(error) => { return true }
+    }
+    return false
+}
+
+test "exchange authenticated encrypted chat through the public package boundary" {
+    let key = SecureSession.generate_key()
+    var listener = require_listener(SecureSession.listen("127.0.0.1", 0, key))
+    let endpoint = require_endpoint(listener.local_endpoint())
+    var executor = Threading.Executor(worker_count:1)
+    var server = executor.submit(SecureChatServer(listener:listener))
+
+    var client = require_connection(SecureSession.connect_endpoint(endpoint, key))
+    match client.send_text(7, "hello securely") {
+        success => {}
+        failure(error) => { panic(error.detail) }
+    }
+    let reply = require_message(client.receive())
+    assert(reply.channel == 8)
+    match reply.text() {
+        success(text) => { assert(text == "welcome securely") }
+        failure(error) => { panic(error.detail) }
+    }
+    var completed = server.complete()
+}
+
+test "reject a peer that does not possess the shared invitation key" {
+    let server_key = require_shared_key(SecureSession.parse_key(
+        "sync1_0000000000000000000000000000000000000000000000000000000000000000"
+    ))
+    let client_key = require_shared_key(SecureSession.parse_key(
+        "sync1_1111111111111111111111111111111111111111111111111111111111111111"
+    ))
+    var listener = require_listener(SecureSession.listen("127.0.0.1", 0, server_key))
+    let endpoint = require_endpoint(listener.local_endpoint())
+    var executor = Threading.Executor(worker_count:1)
+    var server = executor.submit(RejectingSecureServer(listener:listener, rejected:false))
+
+    match SecureSession.connect_endpoint(endpoint, client_key) {
+        success(connection) => { panic("a peer using another key should be rejected") }
+        failure(error) => { assert(error.kind == Sync.ErrorKind.authentication) }
+    }
+    var completed = server.complete()
+    assert(completed.rejected)
+}

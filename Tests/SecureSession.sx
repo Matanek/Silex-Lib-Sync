@@ -1,0 +1,29 @@
+use Sync
+use Sync.SecureSession
+
+func require_key(result:Result<SecureSession.SharedKey, Sync.Error>) SecureSession.SharedKey {
+    match result {
+        success(value) => { return value }
+        failure(error) => { panic(error.detail) }
+    }
+    panic("secure shared key result was not handled")
+}
+
+test "round-trip secure invitation keys" {
+    let generated = SecureSession.generate_key()
+    let encoded = generated.text()
+    assert(encoded.count() == 70)
+    let parsed = require_key(SecureSession.parse_key(encoded))
+    assert(parsed.text() == encoded)
+}
+
+test "reject malformed secure invitation keys" {
+    match SecureSession.parse_key("not-a-sync-key") {
+        success(value) => { panic("malformed key should be rejected") }
+        failure(error) => { assert(error.kind == Sync.ErrorKind.invalid_key) }
+    }
+    match SecureSession.parse_key("sync1_zz00000000000000000000000000000000000000000000000000000000000000") {
+        success(value) => { panic("non-hexadecimal key should be rejected") }
+        failure(error) => { assert(error.kind == Sync.ErrorKind.invalid_key) }
+    }
+}

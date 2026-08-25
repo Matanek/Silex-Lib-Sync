@@ -1,0 +1,56 @@
+use Sync
+use Sync.SecureSession.Crypto
+use STD.Threading
+
+func run_crypto_on_worker() bool {
+    let seed:uint8[] = [
+        0, 1, 2, 3, 4, 5, 6, 7,
+        8, 9, 10, 11, 12, 13, 14, 15,
+        16, 17, 18, 19, 20, 21, 22, 23,
+        24, 25, 26, 27, 28, 29, 30, 31
+    ]
+    match Crypto.key_pair(@seed[0:seed.count()]) {
+        success(value) => {
+            let shared = shared_on_worker(@value.secret[0:32], @value.public_key[0:32])
+            let derived = derive_on_worker(@seed[0:seed.count()])
+            return shared && derived
+        }
+        failure(error) => { return false }
+    }
+    return false
+}
+
+func shared_on_worker(secret:@uint8[..], public_key:@uint8[..]) bool {
+    match Crypto.shared_secret(secret, public_key) {
+        success(value) => { return value[0] != 0 }
+        failure(error) => { return false }
+    }
+    return false
+}
+
+func derive_on_worker(seed:@uint8[..]) bool {
+    let salt:uint8[] = [1, 2, 3, 4]
+    let context:uint8[] = [5, 6, 7, 8]
+    match Crypto.derive(
+        seed,
+        @salt[0:salt.count()],
+        @context[0:context.count()],
+        64
+    ) {
+        success(derived) => { return derived.count() == 64 }
+        failure(error) => { return false }
+    }
+    return false
+}
+
+struct CryptoWorker:Threading.Job {
+    var succeeded:bool
+    func execute() { self.succeeded = run_crypto_on_worker() }
+}
+
+test "invoke the secure native provider from an executor worker" {
+    var executor = Threading.Executor(worker_count:1)
+    var running = executor.submit(CryptoWorker(succeeded:false))
+    let completed = running.complete()
+    assert(completed.succeeded)
+}
