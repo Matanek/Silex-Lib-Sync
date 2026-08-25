@@ -1,35 +1,8 @@
 use Sync
-use Interop.Boundary
-use Interop.C
-
-let native_public_key = C.function<func(
-    C.Pointer<uint8>, C.MutablePointer<int>
-) int32>(library:Boundary.SecureCrypto, name:"sync_secure_public_key")
-
-let native_shared_secret = C.function<func(
-    C.Pointer<uint8>, C.Pointer<uint8>, C.MutablePointer<int>
-) int32>(library:Boundary.SecureCrypto, name:"sync_secure_shared_secret")
-
-let native_derive = C.function<func(
-    C.Pointer<uint8>, C.Size,
-    C.Pointer<uint8>, C.Size,
-    C.Pointer<uint8>, C.Size,
-    C.MutablePointer<uint8>, C.Size
-) int32>(library:Boundary.SecureCrypto, name:"sync_secure_derive")
-
-let native_seal = C.function<func(
-    C.Pointer<uint8>, C.Pointer<uint8>,
-    C.Pointer<uint8>, C.Size,
-    C.Pointer<uint8>, C.Size,
-    C.MutablePointer<uint8>, C.MutablePointer<int>
-) int32>(library:Boundary.SecureCrypto, name:"sync_secure_seal")
-
-let native_open = C.function<func(
-    C.Pointer<uint8>, C.Pointer<uint8>,
-    C.Pointer<uint8>, C.Size,
-    C.Pointer<uint8>, C.Size,
-    C.Pointer<uint8>, C.MutablePointer<uint8>
-) int32>(library:Boundary.SecureCrypto, name:"sync_secure_open")
+use STD.Crypto as StandardCrypto
+use STD.Crypto.ChaCha20Poly1305
+use STD.Crypto.HKDF
+use STD.Crypto.X25519
 
 package struct KeyPair {
     let secret:uint8[32]
@@ -37,70 +10,39 @@ package struct KeyPair {
 }
 
 package func key_pair(seed:@uint8[..]) Result<KeyPair, Sync.Error> {
-    if seed.count() != 32 {
-        return Result<KeyPair, Sync.Error>.failure(crypto_error(
-            "sync.secure.key_pair",
-            "ephemeral key seed must contain 32 bytes"
-        ))
+    match X25519.key_pair(seed) {
+        success(pair) => {
+            return Result<KeyPair, Sync.Error>.success(KeyPair(
+                secret:pair.secret,
+                public_key:pair.public_key
+            ))
+        }
+        failure(error) => {
+            return Result<KeyPair, Sync.Error>.failure(cryptography_error(
+                "sync.secure.key_pair",
+                error.detail
+            ))
+        }
     }
-    let packed_seed = C.string(seed)
-    var public_storage:int[8]
-    let status = native_public_key(C.pointer(packed_seed), C.mutable_pointer(public_storage))
-    if status != 0 {
-        return Result<KeyPair, Sync.Error>.failure(crypto_error(
-            "sync.secure.key_pair",
-            "native X25519 rejected the ephemeral key seed"
-        ))
-    }
-    var public_key:uint8[32]
-    var secret:uint8[32]
-    let public_address = C.address_bits(C.mutable_pointer(public_storage))
-    var index = 0
-    while index < 32 {
-        public_key[index] = C.load<uint8>(public_address, index as uint)
-        secret[index] = seed[index]
-        index++
-    }
-    return Result<KeyPair, Sync.Error>.success(KeyPair(
-        secret:secret,
-        public_key:public_key
-    ))
+    panic("Sync secure key pair result was not handled")
 }
 
 package func shared_secret(
     secret:@uint8[..],
     peer_public_key:@uint8[..]
 ) Result<uint8[32], Sync.Error> {
-    if secret.count() != 32 || peer_public_key.count() != 32 {
-        return Result<uint8[32], Sync.Error>.failure(crypto_error(
-            "sync.secure.shared_secret",
-            "X25519 keys must contain 32 bytes"
-        ))
+    match X25519.shared_secret(secret, peer_public_key) {
+        success(value) => { return Result<uint8[32], Sync.Error>.success(value) }
+        failure(error) => {
+            return Result<uint8[32], Sync.Error>.failure(Sync.failure(
+                Sync.ErrorKind.authentication,
+                "sync.secure.shared_secret",
+                null,
+                error.detail
+            ))
+        }
     }
-    let packed_secret = C.string(secret)
-    let packed_public = C.string(peer_public_key)
-    var output_storage:int[8]
-    let status = native_shared_secret(
-        C.pointer(packed_secret),
-        C.pointer(packed_public),
-        C.mutable_pointer(output_storage)
-    )
-    if status != 0 {
-        return Result<uint8[32], Sync.Error>.failure(Sync.failure(
-            Sync.ErrorKind.authentication,
-            "sync.secure.shared_secret",
-            null,
-            "peer supplied an invalid ephemeral X25519 public key"
-        ))
-    }
-    var output:uint8[32]
-    let output_address = C.address_bits(C.mutable_pointer(output_storage))
-    var index = 0
-    while index < 32 {
-        output[index] = C.load<uint8>(output_address, index as uint)
-        index++
-    }
-    return Result<uint8[32], Sync.Error>.success(output)
+    panic("Sync secure shared secret result was not handled")
 }
 
 package func derive(
@@ -109,37 +51,16 @@ package func derive(
     context:@uint8[..],
     output_count:int
 ) Result<uint8[], Sync.Error> {
-    if output_count < 0 || output_count > 8_160 {
-        return Result<uint8[], Sync.Error>.failure(crypto_error(
-            "sync.secure.derive",
-            "HKDF-SHA256 output must contain between 0 and 8160 bytes"
-        ))
+    match HKDF.derive_sha256(input, salt, context, output_count) {
+        success(value) => { return Result<uint8[], Sync.Error>.success(value) }
+        failure(error) => {
+            return Result<uint8[], Sync.Error>.failure(cryptography_error(
+                "sync.secure.derive",
+                error.detail
+            ))
+        }
     }
-    let packed_input = C.string(input)
-    let packed_salt = C.string(salt)
-    let packed_context = C.string(context)
-    var storage:uint8[] = []
-    while storage.count() < output_count { storage.append(0 as uint8) }
-    var packed_output = C.string(@storage[0:storage.count()])
-    let status = native_derive(
-        C.pointer(packed_input), C.byte_count(packed_input),
-        C.pointer(packed_salt), C.byte_count(packed_salt),
-        C.pointer(packed_context), C.byte_count(packed_context),
-        C.mutable_string_pointer(packed_output), output_count as C.Size
-    )
-    if status != 0 {
-        return Result<uint8[], Sync.Error>.failure(crypto_error(
-            "sync.secure.derive",
-            "native HKDF-SHA256 derivation failed"
-        ))
-    }
-    var output:uint8[] = []
-    var index = 0
-    while index < output_count {
-        output.append(C.byte_at(packed_output, index as C.Size))
-        index++
-    }
-    return Result<uint8[], Sync.Error>.success(output)
+    panic("Sync secure derivation result was not handled")
 }
 
 package func seal(
@@ -148,47 +69,16 @@ package func seal(
     associated:@uint8[..],
     message:@uint8[..]
 ) Result<uint8[], Sync.Error> {
-    if key.count() != 32 || nonce.count() != 12 {
-        return Result<uint8[], Sync.Error>.failure(crypto_error(
-            "sync.secure.seal",
-            "ChaCha20-Poly1305 requires a 32-byte key and 12-byte nonce"
-        ))
+    match ChaCha20Poly1305.seal(key, nonce, associated, message) {
+        success(value) => { return Result<uint8[], Sync.Error>.success(value) }
+        failure(error) => {
+            return Result<uint8[], Sync.Error>.failure(cryptography_error(
+                "sync.secure.seal",
+                error.detail
+            ))
+        }
     }
-    let packed_key = C.string(key)
-    let packed_nonce = C.string(nonce)
-    let packed_associated = C.string(associated)
-    let packed_message = C.string(message)
-    var storage:uint8[] = []
-    while storage.count() < message.count() { storage.append(0 as uint8) }
-    var packed_ciphertext = C.string(@storage[0:storage.count()])
-    var tag_storage:int[4]
-    let status = native_seal(
-        C.pointer(packed_key),
-        C.pointer(packed_nonce),
-        C.pointer(packed_associated), C.byte_count(packed_associated),
-        C.pointer(packed_message), C.byte_count(packed_message),
-        C.mutable_string_pointer(packed_ciphertext),
-        C.mutable_pointer(tag_storage)
-    )
-    if status != 0 {
-        return Result<uint8[], Sync.Error>.failure(crypto_error(
-            "sync.secure.seal",
-            "native ChaCha20-Poly1305 encryption failed"
-        ))
-    }
-    var output:uint8[] = []
-    var index = 0
-    while index < message.count() {
-        output.append(C.byte_at(packed_ciphertext, index as C.Size))
-        index++
-    }
-    let tag_address = C.address_bits(C.mutable_pointer(tag_storage))
-    index = 0
-    while index < 16 {
-        output.append(C.load<uint8>(tag_address, index as uint))
-        index++
-    }
-    return Result<uint8[], Sync.Error>.success(output)
+    panic("Sync secure seal result was not handled")
 }
 
 package func open(
@@ -197,58 +87,26 @@ package func open(
     associated:@uint8[..],
     sealed:@uint8[..]
 ) Result<uint8[], Sync.Error> {
-    if key.count() != 32 || nonce.count() != 12 {
-        return Result<uint8[], Sync.Error>.failure(crypto_error(
-            "sync.secure.open",
-            "ChaCha20-Poly1305 requires a 32-byte key and 12-byte nonce"
-        ))
+    match ChaCha20Poly1305.open(key, nonce, associated, sealed) {
+        success(value) => { return Result<uint8[], Sync.Error>.success(value) }
+        failure(error) => {
+            if error.kind == StandardCrypto.ErrorKind.authentication_failed {
+                return Result<uint8[], Sync.Error>.failure(Sync.failure(
+                    Sync.ErrorKind.authentication,
+                    "sync.secure.open",
+                    null,
+                    error.detail
+                ))
+            }
+            return Result<uint8[], Sync.Error>.failure(cryptography_error(
+                "sync.secure.open",
+                error.detail
+            ))
+        }
     }
-    if sealed.count() < 16 {
-        return Result<uint8[], Sync.Error>.failure(authentication_error(
-            "encrypted message is shorter than its authentication tag"
-        ))
-    }
-    let ciphertext_count = sealed.count() - 16
-    let packed_key = C.string(key)
-    let packed_nonce = C.string(nonce)
-    let packed_associated = C.string(associated)
-    let packed_ciphertext = C.string(@sealed[0:ciphertext_count])
-    let packed_tag = C.string(@sealed[ciphertext_count:sealed.count()])
-    var storage:uint8[] = []
-    while storage.count() < ciphertext_count { storage.append(0 as uint8) }
-    var packed_message = C.string(@storage[0:storage.count()])
-    let status = native_open(
-        C.pointer(packed_key),
-        C.pointer(packed_nonce),
-        C.pointer(packed_associated), C.byte_count(packed_associated),
-        C.pointer(packed_ciphertext), ciphertext_count as C.Size,
-        C.pointer(packed_tag),
-        C.mutable_string_pointer(packed_message)
-    )
-    if status == 2 {
-        return Result<uint8[], Sync.Error>.failure(authentication_error(
-            "encrypted message authentication failed"
-        ))
-    }
-    if status != 0 {
-        return Result<uint8[], Sync.Error>.failure(crypto_error(
-            "sync.secure.open",
-            "native ChaCha20-Poly1305 decryption failed"
-        ))
-    }
-    var output:uint8[] = []
-    var index = 0
-    while index < ciphertext_count {
-        output.append(C.byte_at(packed_message, index as C.Size))
-        index++
-    }
-    return Result<uint8[], Sync.Error>.success(output)
+    panic("Sync secure open result was not handled")
 }
 
-func crypto_error(operation:str, detail:str) Sync.Error {
+func cryptography_error(operation:str, detail:str) Sync.Error {
     return Sync.failure(Sync.ErrorKind.cryptography, operation, null, detail)
-}
-
-func authentication_error(detail:str) Sync.Error {
-    return Sync.failure(Sync.ErrorKind.authentication, "sync.secure.open", null, detail)
 }

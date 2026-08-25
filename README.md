@@ -90,8 +90,9 @@ band with the intended peers and do not log or commit it. Anyone holding the
 same invitation is an authenticated member of the session; Sync does not yet
 assign a durable identity to each person or device.
 
-The native provider uses ephemeral X25519, HKDF-SHA256 and
-ChaCha20-Poly1305. The handshake proves mutual possession of the invitation,
+`STD.Crypto` supplies ephemeral X25519, HKDF-SHA256 and ChaCha20-Poly1305
+through its public Silex API. Sync owns only the secure-session protocol above
+those general primitives. The handshake proves mutual possession of the invitation,
 derives independent directional keys, binds both ephemeral public keys and
 nonces into the exchange, and closes on failed authentication. Per-direction
 64-bit counters bind the channel and sequence to every encrypted frame, so a
@@ -107,8 +108,8 @@ named server identity, revocation or account recovery still need those policies
 above Sync.
 
 See [SecureChatRoundTrip.sx](Examples/SecureChatRoundTrip.sx) for a complete
-secure client/server chat. The native provider is included for macOS ARM64,
-Linux x64, Windows x64 and Windows ARM64.
+secure client/server chat. Its platform availability follows the distributed
+targets supported by the linked STD package.
 
 ## Freshness-first datagrams
 
@@ -281,7 +282,9 @@ its handshake; Netcode remains intentionally plain UDP in this release.
 
 `STD.Network` owns endpoints and raw TCP/UDP sockets. `HTTP` owns bounded
 HTTP/1.1 clients and application servers. Sync adds framed, long-lived
-application communication without duplicating those primitives.
+application communication without duplicating those primitives. Sync itself is
+written entirely in Silex: `STD` owns the native networking and cryptographic
+foundations, their Interop boundary and their platform artifacts.
 
 A connected game can use HTTP for authentication, matchmaking, configuration
 and downloads, `Sync.SecureSession` for private chat or authenticated control
@@ -307,8 +310,6 @@ silex test Packages/Sync/Tests/NetcodeProtocol.sx
 silex test Packages/Sync/Tests/Freshness.sx
 silex test Packages/Sync/Tests/Heartbeat.sx
 silex test Packages/Sync/Tests/Statistics.sx
-silex test Packages/Sync/Tests/SecureCrypto.sx
-silex test Packages/Sync/Tests/SecureCryptoThreading.sx
 silex test Packages/Sync/Tests/SecureSession.sx
 silex test Packages/Sync/Tests/Consumer/Tests
 silex run Packages/Sync/Examples/MessageRoundTrip.sx
@@ -316,10 +317,4 @@ silex run Packages/Sync/Examples/SecureChatRoundTrip.sx
 silex run Packages/Sync/Examples/NetcodeRoundTrip.sx
 silex run Packages/Sync/Examples/NetcodeHealthRoundTrip.sx
 silex run Packages/Sync/Benchmarks/Freshness.sx
-```
-
-Verify bundled native-provider artifacts from `Boundary/` with:
-
-```text
-shasum -a 256 -c SHA256SUMS.txt
 ```

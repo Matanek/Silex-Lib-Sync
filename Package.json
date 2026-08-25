@@ -8,35 +8,5 @@
   },
   "dependencies": {
     "STD": "^0.19.0"
-  },
-  "boundary": {
-    "macos-arm64": {
-      "providers": {
-        "SecureCrypto": {
-          "archive": "Boundary/macos-arm64/libSecureCrypto.a"
-        }
-      }
-    },
-    "linux-x64": {
-      "providers": {
-        "SecureCrypto": {
-          "archive": "Boundary/linux-x64/libSecureCrypto.a"
-        }
-      }
-    },
-    "windows-x64": {
-      "providers": {
-        "SecureCrypto": {
-          "archive": "Boundary/windows-x64/SecureCrypto.lib"
-        }
-      }
-    },
-    "windows-arm64": {
-      "providers": {
-        "SecureCrypto": {
-          "archive": "Boundary/windows-arm64/SecureCrypto.lib"
-        }
-      }
-    }
   }
 }
