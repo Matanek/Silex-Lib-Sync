@@ -1,0 +1,54 @@
+use Sync.Netcode.Freshness
+use Sync.Netcode.Statistics
+
+test "summarize sent fresh lost duplicate and stale Netcode packets" {
+    var statistics = Statistics.tracker()
+    statistics.record_sent(10)
+    statistics.observe(Freshness.Decision(
+        kind:Freshness.Kind.first,
+        previous_sequence:null,
+        missed_packets:0
+    ))
+    statistics.observe(Freshness.Decision(
+        kind:Freshness.Kind.newer,
+        previous_sequence:10 as uint32,
+        missed_packets:2
+    ))
+    statistics.observe(Freshness.Decision(
+        kind:Freshness.Kind.duplicate,
+        previous_sequence:13 as uint32,
+        missed_packets:0
+    ))
+    statistics.observe(Freshness.Decision(
+        kind:Freshness.Kind.stale,
+        previous_sequence:13 as uint32,
+        missed_packets:0
+    ))
+
+    let snapshot = statistics.snapshot()
+    assert(snapshot.sent_packets == 10)
+    assert(snapshot.received_packets == 4)
+    assert(snapshot.fresh_packets == 2)
+    assert(snapshot.duplicate_packets == 1)
+    assert(snapshot.stale_packets == 1)
+    assert(snapshot.estimated_missed_packets == 2)
+    if let ratio = snapshot.estimated_loss_ratio() { assert(ratio == 0.5) }
+    else { panic("loss ratio should be available") }
+    if let ratio = snapshot.duplicate_ratio() { assert(ratio == 0.25) }
+    else { panic("duplicate ratio should be available") }
+    if let ratio = snapshot.stale_ratio() { assert(ratio == 0.25) }
+    else { panic("stale ratio should be available") }
+
+    statistics.reset()
+    let cleared = statistics.snapshot()
+    assert(cleared.received_packets == 0)
+    assert(cleared.estimated_loss_ratio() == null)
+}
+
+test "saturate long-lived Netcode counters instead of overflowing" {
+    var statistics = Statistics.tracker()
+    let maximum = (4_294_967_295 as uint64 << 32) + 4_294_967_295 as uint64
+    statistics.record_sent(maximum)
+    statistics.record_sent()
+    assert(statistics.snapshot().sent_packets == maximum)
+}

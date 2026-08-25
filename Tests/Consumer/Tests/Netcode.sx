@@ -1,6 +1,16 @@
 use Sync
 use Sync.Netcode
 use Sync.Netcode.Freshness
+use Sync.Netcode.Heartbeat
+use Sync.Netcode.Statistics
+
+func require_heartbeat(result:Result<Heartbeat.State, Sync.Error>) Heartbeat.State {
+    match result {
+        success(value) => { return value }
+        failure(error) => { panic(error.detail) }
+    }
+    panic("heartbeat result was not handled")
+}
 
 test "exchange sequenced datagrams through the public Netcode API" {
     func run() Result<void, Sync.Error> {
@@ -12,6 +22,7 @@ test "exchange sequenced datagrams through the public Netcode API" {
         var client = try Netcode.bind("127.0.0.1", 0, options)
         var server_freshness = try Freshness.tracker(8)
         var client_freshness = try Freshness.tracker(8)
+        var server_statistics = Statistics.tracker()
         let server_endpoint = try server.local_endpoint()
 
         var sequence = Netcode.Sequencer(41)
@@ -31,19 +42,27 @@ test "exchange sequenced datagrams through the public Netcode API" {
         assert(received.payload_bytes == 4)
         assert(reusable_view[0] == 10 && reusable_view[3] == 40)
         let first = try server_freshness.observe(received)
+        server_statistics.observe(first)
         assert(first.kind == Freshness.Kind.first && first.should_apply())
 
         try client.send(server_endpoint, 3, 41, @state[0:state.count()])
         let repeated = try server.receive_into(reusable_view)
         let duplicate = try server_freshness.observe(repeated)
+        server_statistics.observe(duplicate)
         assert(duplicate.kind == Freshness.Kind.duplicate)
         assert(!duplicate.should_apply())
 
         try client.send(server_endpoint, 3, 43, @state[0:state.count()])
         let advanced = try server.receive_into(reusable_view)
         let newer = try server_freshness.observe(advanced)
+        server_statistics.observe(newer)
         assert(newer.kind == Freshness.Kind.newer)
         assert(newer.missed_packets == 1)
+        let snapshot = server_statistics.snapshot()
+        assert(snapshot.received_packets == 3)
+        assert(snapshot.fresh_packets == 2)
+        assert(snapshot.duplicate_packets == 1)
+        assert(snapshot.estimated_missed_packets == 1)
 
         let reply:uint8[] = [99]
         try server.send(received.sender, 4, 8, @reply[0:reply.count()])
@@ -53,6 +72,21 @@ test "exchange sequenced datagrams through the public Netcode API" {
         assert(datagram.payload.count() == 1 && datagram.payload[0] == 99)
         let reply_freshness = try client_freshness.observe(datagram)
         assert(reply_freshness.kind == Freshness.Kind.first)
+
+        let ping = try Heartbeat.ping(20_000)
+        let ping_payload = Heartbeat.encode(ping)
+        try client.send(server_endpoint, 5, 1, @ping_payload[0:16])
+        let ping_received = try server.receive_into(reusable_view)
+        let decoded_ping = try Heartbeat.decode(@reusable_view[0:ping_received.payload_bytes])
+        let pong = try Heartbeat.pong(decoded_ping)
+        let pong_payload = Heartbeat.encode(pong)
+        try server.send(ping_received.sender, 5, 1, @pong_payload[0:16])
+        let pong_received = try client.receive()
+        let decoded_pong = try Heartbeat.decode(
+            @pong_received.payload[0:pong_received.payload.count()]
+        )
+        let round_trip = try Heartbeat.round_trip_milliseconds(decoded_pong, 20_007)
+        assert(round_trip == 7)
 
         var oversized:uint8[] = []
         var index = 0
@@ -73,6 +107,18 @@ test "exchange sequenced datagrams through the public Netcode API" {
         success => {}
         failure(error) => { panic(error.operation + ": " + error.detail) }
     }
+}
+
+test "schedule public heartbeat policy without per-packet allocation" {
+    let options = Heartbeat.default_options()
+        .with_interval(250)
+        .with_timeout(1_000)
+    var heartbeat = require_heartbeat(Heartbeat.state(options, 10_000))
+    assert(heartbeat.should_send(10_000))
+    heartbeat.mark_sent(10_000)
+    heartbeat.observe_receive(10_100)
+    assert(heartbeat.status(11_099) == Heartbeat.Status.alive)
+    assert(heartbeat.status(11_100) == Heartbeat.Status.timed_out)
 }
 
 test "reject invalid Netcode resource policies" {

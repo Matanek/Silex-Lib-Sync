@@ -1,0 +1,273 @@
+use Sync
+
+public enum Status {
+    waiting
+    alive
+    timed_out
+}
+
+public enum PulseKind {
+    ping
+    pong
+}
+
+public struct Pulse {
+    let kind:PulseKind
+    let token:uint64
+}
+
+public struct Options {
+    let interval_milliseconds:int
+    let timeout_milliseconds:int
+
+    func with_interval(milliseconds:int) Options {
+        return Options(
+            interval_milliseconds:milliseconds,
+            timeout_milliseconds:self.timeout_milliseconds
+        )
+    }
+
+    func with_timeout(milliseconds:int) Options {
+        return Options(
+            interval_milliseconds:self.interval_milliseconds,
+            timeout_milliseconds:milliseconds
+        )
+    }
+}
+
+public func default_options() Options {
+    return Options(interval_milliseconds:1_000, timeout_milliseconds:5_000)
+}
+
+public struct State {
+    module let interval_milliseconds:int
+    module let timeout_milliseconds:int
+    module let started_at_milliseconds:int
+    module var last_sent_milliseconds:int
+    module var last_received_milliseconds:int
+    module var has_sent:bool
+    module var has_received:bool
+
+    func status(now_milliseconds:int) Status {
+        var reference = self.started_at_milliseconds
+        if self.has_received { reference = self.last_received_milliseconds }
+        if elapsed(reference, now_milliseconds) >= self.timeout_milliseconds {
+            return Status.timed_out
+        }
+        if self.has_received { return Status.alive }
+        return Status.waiting
+    }
+
+    func should_send(now_milliseconds:int) bool {
+        if !self.has_sent { return true }
+        return elapsed(self.last_sent_milliseconds, now_milliseconds) >=
+            self.interval_milliseconds
+    }
+
+    func milliseconds_until_send(now_milliseconds:int) int {
+        if !self.has_sent { return 0 }
+        let passed = elapsed(self.last_sent_milliseconds, now_milliseconds)
+        if passed >= self.interval_milliseconds { return 0 }
+        return self.interval_milliseconds - passed
+    }
+
+    func mark_sent(now_milliseconds:int) {
+        self.last_sent_milliseconds = nonnegative(now_milliseconds)
+        self.has_sent = true
+    }
+
+    func observe_receive(now_milliseconds:int) {
+        self.last_received_milliseconds = nonnegative(now_milliseconds)
+        self.has_received = true
+    }
+
+    func is_timed_out(now_milliseconds:int) bool {
+        return self.status(now_milliseconds) == Status.timed_out
+    }
+
+    func milliseconds_since_receive(now_milliseconds:int) int? {
+        if !self.has_received { return null }
+        return elapsed(self.last_received_milliseconds, now_milliseconds)
+    }
+}
+
+public func state(started_at_milliseconds:int) Result<State, Sync.Error> {
+    return state(default_options(), started_at_milliseconds)
+}
+
+public func state(options:Options, started_at_milliseconds:int) Result<State, Sync.Error> {
+    try validate(options)
+    if started_at_milliseconds < 0 {
+        return Result<State, Sync.Error>.failure(clock_error(
+            "heartbeat start time must be non-negative"
+        ))
+    }
+    return Result<State, Sync.Error>.success(State(
+        interval_milliseconds:options.interval_milliseconds,
+        timeout_milliseconds:options.timeout_milliseconds,
+        started_at_milliseconds:started_at_milliseconds,
+        last_sent_milliseconds:started_at_milliseconds,
+        last_received_milliseconds:started_at_milliseconds,
+        has_sent:false,
+        has_received:false
+    ))
+}
+
+public func ping(now_milliseconds:int) Result<Pulse, Sync.Error> {
+    if now_milliseconds < 0 {
+        return Result<Pulse, Sync.Error>.failure(clock_error(
+            "heartbeat time must be non-negative"
+        ))
+    }
+    return Result<Pulse, Sync.Error>.success(Pulse(
+        kind:PulseKind.ping,
+        token:now_milliseconds as uint64
+    ))
+}
+
+public func pong(request:@Pulse) Result<Pulse, Sync.Error> {
+    if request.kind != PulseKind.ping {
+        return Result<Pulse, Sync.Error>.failure(pulse_error(
+            "only a heartbeat ping can be answered"
+        ))
+    }
+    return Result<Pulse, Sync.Error>.success(Pulse(
+        kind:PulseKind.pong,
+        token:request.token
+    ))
+}
+
+public func encode(pulse:@Pulse) uint8[16] {
+    var output:uint8[16]
+    output[0] = 83
+    output[1] = 72
+    output[2] = 66
+    output[3] = 84
+    output[4] = 1
+    output[5] = match pulse.kind { ping => 1 as uint8; pong => 2 as uint8 }
+    output[6] = 0
+    output[7] = 0
+    write_uint64(&output[0:16], 8, pulse.token)
+    return output
+}
+
+public func decode(bytes:@uint8[..]) Result<Pulse, Sync.Error> {
+    if bytes.count() != 16 {
+        return Result<Pulse, Sync.Error>.failure(pulse_error(
+            "heartbeat pulse must contain exactly 16 bytes"
+        ))
+    }
+    if bytes[0] != 83 || bytes[1] != 72 || bytes[2] != 66 || bytes[3] != 84 {
+        return Result<Pulse, Sync.Error>.failure(pulse_error(
+            "heartbeat pulse has an invalid signature"
+        ))
+    }
+    if bytes[4] != 1 {
+        return Result<Pulse, Sync.Error>.failure(Sync.failure(
+            Sync.ErrorKind.unsupported_version,
+            "sync.netcode.heartbeat.decode",
+            null,
+            "peer uses an unsupported heartbeat protocol version"
+        ))
+    }
+    if bytes[6] != 0 || bytes[7] != 0 || (bytes[5] != 1 && bytes[5] != 2) {
+        return Result<Pulse, Sync.Error>.failure(pulse_error(
+            "heartbeat pulse has an invalid kind or reserved flags"
+        ))
+    }
+    return Result<Pulse, Sync.Error>.success(Pulse(
+        kind:if_kind(bytes[5]),
+        token:read_uint64(bytes, 8)
+    ))
+}
+
+public func round_trip_milliseconds(
+    response:@Pulse,
+    now_milliseconds:int
+) Result<int, Sync.Error> {
+    if response.kind != PulseKind.pong {
+        return Result<int, Sync.Error>.failure(pulse_error(
+            "round-trip measurement requires a heartbeat pong"
+        ))
+    }
+    if now_milliseconds < 0 || (now_milliseconds as uint64) < response.token {
+        return Result<int, Sync.Error>.failure(clock_error(
+            "heartbeat clock moved before the echoed ping token"
+        ))
+    }
+    return Result<int, Sync.Error>.success(
+        (now_milliseconds as uint64 - response.token) as int
+    )
+}
+
+func validate(options:Options) Result<void, Sync.Error> {
+    if options.interval_milliseconds <= 0 {
+        return Result<void, Sync.Error>.failure(Sync.failure(
+            Sync.ErrorKind.invalid_configuration,
+            "sync.netcode.heartbeat.options",
+            "interval_milliseconds",
+            "heartbeat interval must be positive"
+        ))
+    }
+    if options.timeout_milliseconds < options.interval_milliseconds {
+        return Result<void, Sync.Error>.failure(Sync.failure(
+            Sync.ErrorKind.invalid_configuration,
+            "sync.netcode.heartbeat.options",
+            "timeout_milliseconds",
+            "heartbeat timeout must be at least one interval"
+        ))
+    }
+    return Result<void, Sync.Error>.success()
+}
+
+func elapsed(start:int, end:int) int {
+    if end <= start { return 0 }
+    return end - start
+}
+
+func nonnegative(value:int) int {
+    if value < 0 { return 0 }
+    return value
+}
+
+func if_kind(encoded:uint8) PulseKind {
+    if encoded == 1 { return PulseKind.ping }
+    return PulseKind.pong
+}
+
+func write_uint64(output:&uint8[..], offset:int, value:uint64) {
+    var index = 0
+    while index < 8 {
+        let shift = (7 - index) * 8
+        output[offset + index] = ((value >> shift) & 255) as uint8
+        index++
+    }
+}
+
+func read_uint64(input:@uint8[..], offset:int) uint64 {
+    var value:uint64 = 0
+    var index = 0
+    while index < 8 {
+        value = (value << 8) + input[offset + index] as uint64
+        index++
+    }
+    return value
+}
+
+func pulse_error(detail:str) Sync.Error {
+    return Sync.failure(
+        Sync.ErrorKind.malformed_message,
+        "sync.netcode.heartbeat.pulse",
+        null,
+        detail
+    )
+}
+
+func clock_error(detail:str) Sync.Error {
+    return Sync.failure(
+        Sync.ErrorKind.invalid_configuration,
+        "sync.netcode.heartbeat.clock",
+        null,
+        detail
+    )
+}

@@ -1,0 +1,98 @@
+use Sync.Netcode.Freshness
+
+public struct Snapshot {
+    let sent_packets:uint64
+    let received_packets:uint64
+    let fresh_packets:uint64
+    let duplicate_packets:uint64
+    let stale_packets:uint64
+    let estimated_missed_packets:uint64
+
+    func estimated_loss_ratio() float? {
+        let expected = saturated_add(self.fresh_packets, self.estimated_missed_packets)
+        if expected == 0 { return null }
+        return (self.estimated_missed_packets as float) / (expected as float)
+    }
+
+    func duplicate_ratio() float? {
+        if self.received_packets == 0 { return null }
+        return (self.duplicate_packets as float) / (self.received_packets as float)
+    }
+
+    func stale_ratio() float? {
+        if self.received_packets == 0 { return null }
+        return (self.stale_packets as float) / (self.received_packets as float)
+    }
+}
+
+public struct Tracker {
+    module var sent_packets:uint64
+    module var received_packets:uint64
+    module var fresh_packets:uint64
+    module var duplicate_packets:uint64
+    module var stale_packets:uint64
+    module var estimated_missed_packets:uint64
+
+    func record_sent(count:uint64 = 1) {
+        self.sent_packets = saturated_add(self.sent_packets, count)
+    }
+
+    func observe(decision:@Freshness.Decision) {
+        self.received_packets = saturated_add(self.received_packets, 1)
+        match decision.kind {
+            first => { self.fresh_packets = saturated_add(self.fresh_packets, 1) }
+            newer => {
+                self.fresh_packets = saturated_add(self.fresh_packets, 1)
+                self.estimated_missed_packets = saturated_add(
+                    self.estimated_missed_packets,
+                    decision.missed_packets as uint64
+                )
+            }
+            duplicate => {
+                self.duplicate_packets = saturated_add(self.duplicate_packets, 1)
+            }
+            stale => { self.stale_packets = saturated_add(self.stale_packets, 1) }
+        }
+    }
+
+    func snapshot() Snapshot {
+        return Snapshot(
+            sent_packets:self.sent_packets,
+            received_packets:self.received_packets,
+            fresh_packets:self.fresh_packets,
+            duplicate_packets:self.duplicate_packets,
+            stale_packets:self.stale_packets,
+            estimated_missed_packets:self.estimated_missed_packets
+        )
+    }
+
+    func reset() {
+        self.sent_packets = 0
+        self.received_packets = 0
+        self.fresh_packets = 0
+        self.duplicate_packets = 0
+        self.stale_packets = 0
+        self.estimated_missed_packets = 0
+    }
+}
+
+public func tracker() Tracker {
+    return Tracker(
+        sent_packets:0,
+        received_packets:0,
+        fresh_packets:0,
+        duplicate_packets:0,
+        stale_packets:0,
+        estimated_missed_packets:0
+    )
+}
+
+func saturated_add(left:uint64, right:uint64) uint64 {
+    let maximum = maximum_uint64()
+    if right > maximum - left { return maximum }
+    return left + right
+}
+
+func maximum_uint64() uint64 {
+    return (4_294_967_295 as uint64 << 32) + 4_294_967_295 as uint64
+}

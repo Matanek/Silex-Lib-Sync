@@ -1,6 +1,7 @@
 use Sync
 use Sync.Netcode
 use Sync.Netcode.Freshness
+use Sync.Netcode.Statistics
 use STD.Network
 use STD.Time.Stopwatch
 
@@ -76,11 +77,63 @@ func benchmark_tracker(observations:int, repetitions:int) Result<void, Sync.Erro
     return Result<void, Sync.Error>.success()
 }
 
+func benchmark_tracker_with_statistics(
+    observations:int,
+    repetitions:int
+) Result<void, Sync.Error> {
+    var freshness = try Freshness.tracker(64)
+    var statistics = Statistics.tracker()
+    var endpoints:Network.Endpoint[] = []
+    var sequences:uint32[] = []
+    var stream = 0
+    while stream < 64 {
+        endpoints.append(endpoint((stream + 1) as uint8))
+        sequences.append(0 as uint32)
+        let first = try freshness.observe_sequence(endpoints[stream], 1, sequences[stream])
+        assert(first.kind == Freshness.Kind.first)
+        sequences[stream]++
+        stream++
+    }
+
+    var repetition = 0
+    var checksum = 0
+    while repetition < repetitions {
+        var stopwatch = Stopwatch()
+        stopwatch.start()
+        var index = 0
+        while index < observations {
+            stream = index % 64
+            let decision = try freshness.observe_sequence(
+                endpoints[stream],
+                1,
+                sequences[stream]
+            )
+            statistics.observe(decision)
+            if decision.should_apply() { checksum++ }
+            sequences[stream]++
+            index++
+        }
+        stopwatch.stop()
+        print(
+            "tracker+statistics repetition=$(repetition + 1) observations=$(observations) " +
+            "milliseconds=$(stopwatch.get_elapsed_milliseconds())"
+        )
+        repetition++
+    }
+    assert(checksum == observations * repetitions)
+    assert(statistics.snapshot().received_packets == (observations * repetitions) as uint64)
+    return Result<void, Sync.Error>.success()
+}
+
 func main() {
     let observations = 1_000_000
     let repetitions = 5
     benchmark_comparison(observations, repetitions)
     match benchmark_tracker(observations, repetitions) {
+        success => {}
+        failure(error) => { panic(error.operation + ": " + error.detail) }
+    }
+    match benchmark_tracker_with_statistics(observations, repetitions) {
         success => {}
         failure(error) => { panic(error.operation + ": " + error.detail) }
     }

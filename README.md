@@ -160,6 +160,62 @@ configured up to 65,536. Reaching the bound returns `resource_limit` instead of
 silently evicting another peer. Call `forget(sender, channel)` when a stream
 ends, or `clear()` when a whole session is reset.
 
+### Heartbeat and network observations
+
+`Sync.Netcode.Heartbeat` supplies a bounded per-peer state machine plus a
+16-byte ping/pong payload. The application chooses the Netcode channel used by
+the pulse. A pong echoes the ping token, allowing the initiator to measure
+round-trip time without synchronizing clocks between peers.
+
+```sx
+use Sync.Netcode.Heartbeat
+
+let policy = Heartbeat.default_options()
+    .with_interval(1_000)
+    .with_timeout(5_000)
+var heartbeat = try Heartbeat.state(policy, now_milliseconds)
+
+if heartbeat.should_send(now_milliseconds) {
+    let ping = try Heartbeat.ping(now_milliseconds)
+    let payload = Heartbeat.encode(ping)
+    try host.send(peer, heartbeat_channel, sequence.take(), @payload[0:16])
+    heartbeat.mark_sent(now_milliseconds)
+}
+```
+
+On receipt, call `observe_receive(now_milliseconds)` for liveness. Decode a
+heartbeat payload with `Heartbeat.decode`; answer a `ping` with
+`Heartbeat.pong`, or pass a `pong` and the current time to
+`round_trip_milliseconds`. `status(now_milliseconds)` distinguishes a peer that
+is still `waiting`, currently `alive` or `timed_out`.
+
+Time is injected deliberately: sample one monotonic millisecond clock value per
+network tick and reuse it across peers. This avoids hidden clock reads in the
+packet hot path and also makes simulations and tests deterministic.
+
+`Sync.Netcode.Statistics` accumulates sent, received, fresh, duplicate, stale
+and estimated-missed packet counts. Feed it the existing `Freshness.Decision`
+for each datagram. Snapshots expose estimated loss, duplicate and stale ratios;
+counters saturate instead of overflowing and observation allocates no memory.
+
+```sx
+use Sync.Netcode.Statistics
+
+var statistics = Statistics.tracker()
+statistics.record_sent()
+statistics.observe(decision)
+let snapshot = statistics.snapshot()
+```
+
+These policies do not turn UDP into a reliable stream. Put chat, inventory,
+match lifecycle and other must-arrive commands on `Session` or
+`SecureSession`; reserve Netcode for updates where a newer value supersedes an
+older one. This separation avoids head-of-line blocking in visual state while
+keeping reliable application traffic simple.
+
+See [NetcodeHealthRoundTrip.sx](Examples/NetcodeHealthRoundTrip.sx) for a
+complete loopback ping/pong and liveness update.
+
 The default payload limit is 1,200 bytes, a conservative size chosen to reduce
 IP fragmentation risk. The configurable hard ceiling is 65,000 bytes, but a
 larger allowed payload does not make large UDP packets suitable for the public
@@ -212,6 +268,11 @@ same signature, protocol version 1, datagram kind, channel, sequence and payload
 length. Each datagram is independently validated, so a malformed one does not
 invalidate the UDP host.
 
+Heartbeat ping/pong payloads are also fixed sixteen-byte, network-order values:
+the `SHBT` signature, protocol version 1, pulse kind, reserved flags and an
+echoed 64-bit millisecond token. They remain ordinary Netcode payloads on a
+channel selected by the application.
+
 The base Session and Netcode protocols are not encrypted or authenticated.
 `SecureSession` encapsulates Session frames in authenticated encryption after
 its handshake; Netcode remains intentionally plain UDP in this release.
@@ -244,6 +305,8 @@ silex link Packages/Sync --workspace Packages/Sync/Tests/Consumer
 silex test Packages/Sync/Tests/Protocol.sx
 silex test Packages/Sync/Tests/NetcodeProtocol.sx
 silex test Packages/Sync/Tests/Freshness.sx
+silex test Packages/Sync/Tests/Heartbeat.sx
+silex test Packages/Sync/Tests/Statistics.sx
 silex test Packages/Sync/Tests/SecureCrypto.sx
 silex test Packages/Sync/Tests/SecureCryptoThreading.sx
 silex test Packages/Sync/Tests/SecureSession.sx
@@ -251,6 +314,7 @@ silex test Packages/Sync/Tests/Consumer/Tests
 silex run Packages/Sync/Examples/MessageRoundTrip.sx
 silex run Packages/Sync/Examples/SecureChatRoundTrip.sx
 silex run Packages/Sync/Examples/NetcodeRoundTrip.sx
+silex run Packages/Sync/Examples/NetcodeHealthRoundTrip.sx
 silex run Packages/Sync/Benchmarks/Freshness.sx
 ```
 
