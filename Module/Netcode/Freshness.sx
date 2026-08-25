@@ -1,0 +1,204 @@
+use Sync
+use Sync.Netcode
+use STD.Collections.Dictionary
+use STD.Collections.Hashing
+use STD.Network
+
+public enum Kind {
+    first
+    newer
+    duplicate
+    stale
+}
+
+public struct Decision {
+    let kind:Kind
+    let previous_sequence:uint32?
+    let missed_packets:uint32
+
+    func should_apply() bool {
+        return self.kind == Kind.first || self.kind == Kind.newer
+    }
+}
+
+public struct Tracker {
+    module let maximum_streams:int
+    module var sequences:Dictionary<StreamKey, uint32>
+
+    func capacity() int { return self.maximum_streams }
+    func stream_count() int { return self.sequences.count() }
+    func is_full() bool { return self.stream_count() >= self.maximum_streams }
+
+    func observe(value:@Netcode.Received) Result<Decision, Sync.Error> {
+        return self.observe_sequence(value.sender, value.channel, value.sequence)
+    }
+
+    func observe(value:@Netcode.Datagram) Result<Decision, Sync.Error> {
+        return self.observe_sequence(value.sender, value.channel, value.sequence)
+    }
+
+    func observe_sequence(
+        sender:Network.Endpoint,
+        channel:uint16,
+        sequence:uint32
+    ) Result<Decision, Sync.Error> {
+        let key = StreamKey(sender:sender, channel:channel)
+        let replaced = self.sequences.set(key, sequence)
+        if let previous = replaced {
+            if sequence == previous {
+                return Result<Decision, Sync.Error>.success(Decision(
+                    kind:Kind.duplicate,
+                    previous_sequence:previous,
+                    missed_packets:0
+                ))
+            }
+            if Netcode.is_newer(sequence, previous) {
+                return Result<Decision, Sync.Error>.success(Decision(
+                    kind:Kind.newer,
+                    previous_sequence:previous,
+                    missed_packets:missed_between(sequence, previous)
+                ))
+            }
+            self.sequences.set(key, previous)
+            return Result<Decision, Sync.Error>.success(Decision(
+                kind:Kind.stale,
+                previous_sequence:previous,
+                missed_packets:0
+            ))
+        }
+
+        if self.stream_count() > self.maximum_streams {
+            self.sequences.remove(key)
+            return Result<Decision, Sync.Error>.failure(Sync.failure(
+                Sync.ErrorKind.resource_limit,
+                "sync.netcode.freshness.observe",
+                Network.format_endpoint(sender),
+                "freshness tracker reached maximum_streams; forget a stream or increase capacity"
+            ))
+        }
+
+        return Result<Decision, Sync.Error>.success(Decision(
+            kind:Kind.first,
+            previous_sequence:null,
+            missed_packets:0
+        ))
+    }
+
+    func forget(sender:Network.Endpoint, channel:uint16) bool {
+        return self.sequences.remove(StreamKey(sender:sender, channel:channel))
+    }
+
+    func clear() { self.sequences.clear() }
+}
+
+public func tracker() Result<Tracker, Sync.Error> {
+    return tracker(256)
+}
+
+public func tracker(maximum_streams:int) Result<Tracker, Sync.Error> {
+    if maximum_streams <= 0 || maximum_streams > 65_536 {
+        return Result<Tracker, Sync.Error>.failure(Sync.failure(
+            Sync.ErrorKind.invalid_configuration,
+            "sync.netcode.freshness.tracker",
+            null,
+            "maximum_streams must be between 1 and 65536"
+        ))
+    }
+    return Result<Tracker, Sync.Error>.success(Tracker(
+        maximum_streams:maximum_streams,
+        sequences:Dictionary<StreamKey, uint32>(
+            stream_hash,
+            same_stream,
+            maximum_streams + 1
+        )
+    ))
+}
+
+package struct StreamKey {
+    let sender:Network.Endpoint
+    let channel:uint16
+}
+
+func missed_between(sequence:uint32, previous:uint32) uint32 {
+    if sequence > previous { return sequence - previous - 1 }
+    return (4_294_967_295 as uint32 - previous) + sequence
+}
+
+func stream_hash(key:@StreamKey) uint {
+    var result:uint = 14_695_981_039_346_656_037
+    match key.sender.address {
+        ipv4(bytes) => {
+            result = mix_hash(result, 4)
+            var index = 0
+            while index < bytes.count() {
+                result = mix_hash(result, bytes[index] as uint)
+                index++
+            }
+        }
+        ipv6(bytes) => {
+            result = mix_hash(result, 6)
+            var index = 0
+            while index < bytes.count() {
+                result = mix_hash(result, bytes[index] as uint)
+                index++
+            }
+        }
+    }
+    result = mix_hash(result, key.sender.port as uint)
+    result = mix_hash(result, key.sender.scope_id as uint)
+    return mix_hash(result, key.channel as uint)
+}
+
+func mix_hash(current:uint, value:uint) uint {
+    let mixed = current ^ value
+    return (mixed << 7) ^ (mixed >> 3) ^ value
+}
+
+func same_stream(left:@StreamKey, right:@StreamKey) bool {
+    if left.channel != right.channel ||
+        left.sender.port != right.sender.port ||
+        left.sender.scope_id != right.sender.scope_id {
+        return false
+    }
+    match left.sender.address {
+        ipv4(left_bytes) => {
+            return same_ipv4_address(left_bytes, right.sender.address)
+        }
+        ipv6(left_bytes) => {
+            return same_ipv6_address(left_bytes, right.sender.address)
+        }
+    }
+    panic("unknown network address family")
+}
+
+func same_ipv4_address(left:uint8[4], right:Network.IpAddress) bool {
+    return match right {
+        ipv4(right_bytes) => same_ipv4(left, right_bytes)
+        ipv6(right_bytes) => false
+    }
+}
+
+func same_ipv6_address(left:uint8[16], right:Network.IpAddress) bool {
+    return match right {
+        ipv4(right_bytes) => false
+        ipv6(right_bytes) => same_ipv6(left, right_bytes)
+    }
+}
+
+func same_ipv4(left:uint8[4], right:uint8[4]) bool {
+    var index = 0
+    while index < 4 {
+        if left[index] != right[index] { return false }
+        index++
+    }
+    return true
+}
+
+func same_ipv6(left:uint8[16], right:uint8[16]) bool {
+    var index = 0
+    while index < 16 {
+        if left[index] != right[index] { return false }
+        index++
+    }
+    return true
+}

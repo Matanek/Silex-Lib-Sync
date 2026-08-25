@@ -1,5 +1,6 @@
 use Sync
 use Sync.Netcode
+use Sync.Netcode.Freshness
 
 test "exchange sequenced datagrams through the public Netcode API" {
     func run() Result<void, Sync.Error> {
@@ -9,6 +10,8 @@ test "exchange sequenced datagrams through the public Netcode API" {
 
         var server = try Netcode.bind("127.0.0.1", 0, options)
         var client = try Netcode.bind("127.0.0.1", 0, options)
+        var server_freshness = try Freshness.tracker(8)
+        var client_freshness = try Freshness.tracker(8)
         let server_endpoint = try server.local_endpoint()
 
         var sequence = Netcode.Sequencer(41)
@@ -27,6 +30,20 @@ test "exchange sequenced datagrams through the public Netcode API" {
         assert(received.sequence == 41)
         assert(received.payload_bytes == 4)
         assert(reusable_view[0] == 10 && reusable_view[3] == 40)
+        let first = try server_freshness.observe(received)
+        assert(first.kind == Freshness.Kind.first && first.should_apply())
+
+        try client.send(server_endpoint, 3, 41, @state[0:state.count()])
+        let repeated = try server.receive_into(reusable_view)
+        let duplicate = try server_freshness.observe(repeated)
+        assert(duplicate.kind == Freshness.Kind.duplicate)
+        assert(!duplicate.should_apply())
+
+        try client.send(server_endpoint, 3, 43, @state[0:state.count()])
+        let advanced = try server.receive_into(reusable_view)
+        let newer = try server_freshness.observe(advanced)
+        assert(newer.kind == Freshness.Kind.newer)
+        assert(newer.missed_packets == 1)
 
         let reply:uint8[] = [99]
         try server.send(received.sender, 4, 8, @reply[0:reply.count()])
@@ -34,6 +51,8 @@ test "exchange sequenced datagrams through the public Netcode API" {
         assert(datagram.channel == 4)
         assert(datagram.sequence == 8)
         assert(datagram.payload.count() == 1 && datagram.payload[0] == 99)
+        let reply_freshness = try client_freshness.observe(datagram)
+        assert(reply_freshness.kind == Freshness.Kind.first)
 
         var oversized:uint8[] = []
         var index = 0

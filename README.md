@@ -59,9 +59,11 @@ duplicated or reordered. The application decides which updates matter.
 ```sx
 use Sync
 use Sync.Netcode
+use Sync.Netcode.Freshness
 
 var host = try Netcode.bind("127.0.0.1", 9001)
 var sequence = Netcode.Sequencer()
+var freshness = try Freshness.tracker()
 
 let state:uint8[] = [12, 34, 56]
 try host.send(peer, 1, sequence.take(), @state[0:state.count()])
@@ -69,8 +71,9 @@ try host.send(peer, 1, sequence.take(), @state[0:state.count()])
 var storage:uint8[1_200]
 var storage_view = &storage[0:storage.count()]
 let update = try host.receive_into(storage_view)
+let decision = try freshness.observe(update)
 
-if Netcode.is_newer(update.sequence, last_sequence) {
+if decision.should_apply() {
     // Decode storage_view[0:update.payload_bytes] and apply the fresh state.
 }
 ```
@@ -80,8 +83,22 @@ it performs no payload allocation. `receive` is a convenient alternative that
 returns an owned payload copy. Sending reuses storage owned by the host.
 
 Sequence numbers wrap safely at `uint32`'s maximum. `Sequencer` creates them,
-while `is_newer` compares them using the usual half-range rule. They provide
-freshness metadata only: Sync does not automatically discard stale packets.
+while `is_newer` compares them using the usual half-range rule.
+
+`Sync.Netcode.Freshness` turns that metadata into an explicit application
+decision. Its bounded tracker remembers the latest sequence independently for
+each source endpoint and channel. `observe` accepts either a buffered
+`Datagram` or allocation-free `Received` metadata and classifies it as `first`,
+`newer`, `duplicate` or `stale`. A decision also reports the previous sequence,
+the estimated number of missed packets and whether the state should be
+applied.
+
+The tracker keeps no payload and does not discard packets behind the
+application's back. Once streams are admitted, observing them performs no
+payload or tracker allocation. The default capacity is 256 streams; it can be
+configured up to 65,536. Reaching the bound returns `resource_limit` instead of
+silently evicting another peer. Call `forget(sender, channel)` when a stream
+ends, or `clear()` when a whole session is reset.
 
 The default payload limit is 1,200 bytes, a conservative size chosen to reduce
 IP fragmentation risk. The configurable hard ceiling is 65,000 bytes, but a
@@ -118,8 +135,8 @@ let options = Netcode.default_options()
 ```
 
 `Sync.ErrorKind` distinguishes invalid configuration, network failure,
-timeout, closure, malformed messages, unsupported versions, message limits and
-invalid text.
+timeout, closure, malformed messages, unsupported versions, message and
+resource limits, and invalid text.
 
 ## Protocol boundaries
 
@@ -164,7 +181,9 @@ silex link Packages/Sync
 silex link Packages/Sync --workspace Packages/Sync/Tests/Consumer
 silex test Packages/Sync/Tests/Protocol.sx
 silex test Packages/Sync/Tests/NetcodeProtocol.sx
+silex test Packages/Sync/Tests/Freshness.sx
 silex test Packages/Sync/Tests/Consumer/Tests
 silex run Packages/Sync/Examples/MessageRoundTrip.sx
 silex run Packages/Sync/Examples/NetcodeRoundTrip.sx
+silex run Packages/Sync/Benchmarks/Freshness.sx
 ```

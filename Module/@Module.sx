@@ -9,6 +9,7 @@ public enum ErrorKind {
     malformed_message
     unsupported_version
     message_limit
+    resource_limit
     invalid_text
 }
 
