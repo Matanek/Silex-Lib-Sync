@@ -1,0 +1,97 @@
+use Sync
+use Sync.Session
+
+test "exchange bounded messages through a public Sync session" {
+    func run() Result<void, Sync.Error> {
+        let options = Session.default_options()
+            .with_message_limit(64)
+            .with_connect_timeout(2_000)
+            .with_write_timeout(2_000)
+
+        var listener = try Session.listen("127.0.0.1", 0, options)
+        let endpoint = try listener.local_endpoint()
+        var client = try Session.connect_endpoint(endpoint, options)
+        var server = try listener.accept()
+        assert((try client.peer_endpoint()).port == endpoint.port)
+        assert((try server.local_endpoint()).port == endpoint.port)
+
+        try client.send_text(0, "")
+        let empty = try server.receive()
+        assert(empty.channel == 0)
+        assert(try empty.text() == "")
+
+        try client.send_text(7, "hello from client")
+        let request = try server.receive()
+        assert(request.channel == 7)
+        assert(try request.text() == "hello from client")
+
+        let bytes:uint8[] = [0, 1, 127, 255]
+        try server.send(9, @bytes[0:bytes.count()])
+        let response = try client.receive()
+        assert(response.channel == 9)
+        assert(response.payload.count() == 4)
+        assert(response.payload[0] == 0 && response.payload[3] == 255)
+
+        try client.close()
+        try server.close()
+        try listener.close()
+        assert(client.is_closed() && server.is_closed() && listener.is_closed())
+        match client.send_text(1, "closed") {
+            success => { panic("closed session should reject messages") }
+            failure(error) => { assert(error.kind == Sync.ErrorKind.closed) }
+        }
+        try client.close()
+        try listener.close()
+        return Result<void, Sync.Error>.success()
+    }
+
+    match run() {
+        success => {}
+        failure(error) => { panic(error.operation + ": " + error.detail) }
+    }
+}
+
+test "reject invalid session resource policies" {
+    let invalid = Session.default_options().with_message_limit(0)
+    match Session.listen("127.0.0.1", 0, invalid) {
+        success(listener) => { panic("invalid message limit should fail") }
+        failure(error) => { assert(error.kind == Sync.ErrorKind.invalid_configuration) }
+    }
+
+    let negative = Session.default_options().with_read_timeout(-1)
+    match Session.listen("127.0.0.1", 0, negative) {
+        success(listener) => { panic("negative timeout should fail") }
+        failure(error) => { assert(error.kind == Sync.ErrorKind.invalid_configuration) }
+    }
+}
+
+test "reject an oversized message before writing the session" {
+    func run() Result<void, Sync.Error> {
+        let options = Session.default_options().with_message_limit(4)
+        var listener = try Session.listen("127.0.0.1", 0, options)
+        let endpoint = try listener.local_endpoint()
+        var client = try Session.connect("127.0.0.1", endpoint.port, options)
+        var server = try listener.accept()
+
+        let oversized:uint8[] = [1, 2, 3, 4, 5]
+        match client.send(1, @oversized[0:oversized.count()]) {
+            success => { panic("oversized message should fail") }
+            failure(error) => { assert(error.kind == Sync.ErrorKind.message_limit) }
+        }
+
+        try client.send_text(2, "safe")
+        let message = try server.receive()
+        assert(message.channel == 2)
+        assert(try message.text() == "safe")
+
+        try client.close()
+        try server.close()
+        try listener.close()
+        return Result<void, Sync.Error>.success()
+    }
+
+    match run() {
+        success => {}
+        failure(error) => { panic(error.operation + ": " + error.detail) }
+    }
+}

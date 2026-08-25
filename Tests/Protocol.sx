@@ -1,0 +1,69 @@
+use Sync
+use Sync.Session
+
+func require_header(
+    result:Result<Session.FrameHeader, Sync.Error>
+) Session.FrameHeader {
+    var output:Session.FrameHeader? = null
+    match result {
+        success(value) => { output = value }
+        failure(error) => { panic(error.operation + ": " + error.detail) }
+    }
+    if let value = output { return value }
+    panic("decoded Sync session header should be present")
+}
+
+test "encode and decode the stable session frame header" {
+    let bytes = Session.encode_header(513, 65_537)
+    assert(bytes[0] == 83 && bytes[1] == 89 && bytes[2] == 78 && bytes[3] == 67)
+    assert(bytes[4] == 1 && bytes[5] == 0)
+    assert(bytes[6] == 2 && bytes[7] == 1)
+    assert(bytes[8] == 0 && bytes[9] == 1 && bytes[10] == 0 && bytes[11] == 1)
+
+    let header = require_header(Session.decode_header(@bytes[0:bytes.count()]))
+    assert(header.channel == 513)
+    assert(header.payload_bytes == 65_537)
+}
+
+test "reject malformed and unsupported session frame headers" {
+    var invalid_signature = Session.encode_header(1, 0)
+    invalid_signature[0] = 0
+    match Session.decode_header(@invalid_signature[0:invalid_signature.count()]) {
+        success(value) => { panic("invalid signature should fail") }
+        failure(error) => { assert(error.kind == Sync.ErrorKind.malformed_message) }
+    }
+
+    var unsupported = Session.encode_header(1, 0)
+    unsupported[4] = 2
+    match Session.decode_header(@unsupported[0:unsupported.count()]) {
+        success(value) => { panic("unsupported version should fail") }
+        failure(error) => { assert(error.kind == Sync.ErrorKind.unsupported_version) }
+    }
+
+    var reserved = Session.encode_header(1, 0)
+    reserved[5] = 1
+    match Session.decode_header(@reserved[0:reserved.count()]) {
+        success(value) => { panic("reserved flags should fail") }
+        failure(error) => { assert(error.kind == Sync.ErrorKind.malformed_message) }
+    }
+
+    let short:uint8[] = [83, 89, 78]
+    match Session.decode_header(@short[0:short.count()]) {
+        success(value) => { panic("short header should fail") }
+        failure(error) => { assert(error.kind == Sync.ErrorKind.malformed_message) }
+    }
+}
+
+test "decode message text deliberately" {
+    let empty = Sync.Message(channel:0, payload:[])
+    match empty.text() {
+        success(value) => { assert(value == "") }
+        failure(error) => { panic(error.detail) }
+    }
+
+    let invalid = Sync.Message(channel:0, payload:[255])
+    match invalid.text() {
+        success(value) => { panic("invalid UTF-8 should fail") }
+        failure(error) => { assert(error.kind == Sync.ErrorKind.invalid_text) }
+    }
+}

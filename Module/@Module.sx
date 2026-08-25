@@ -1,3 +1,43 @@
-// Sync intentionally exposes no runtime declarations yet. The package root is
-// established independently from its future Session, Channel, Replication and
-// Netcode capabilities so their contracts can be designed from real usages.
+use STD.Text.UTF8
+
+public enum ErrorKind {
+    invalid_configuration
+    network
+    timeout
+    closed
+    malformed_message
+    unsupported_version
+    message_limit
+    invalid_text
+}
+
+public struct Error {
+    let kind:ErrorKind
+    let operation:str
+    let subject:str?
+    let detail:str
+}
+
+public struct Message {
+    let channel:uint16
+    let payload:uint8[]
+
+    func text() Result<str, Error> {
+        if self.payload.is_empty() { return Result<str, Error>.success("") }
+        match UTF8.decode(@self.payload[0:self.payload.count()]) {
+            success(value) => { return Result<str, Error>.success(value) }
+            failure(error) => {
+                return Result<str, Error>.failure(failure(
+                    ErrorKind.invalid_text,
+                    "sync.message.text",
+                    null,
+                    "message payload is not valid UTF-8 at byte $(error.byte_offset)"
+                ))
+            }
+        }
+    }
+}
+
+package func failure(kind:ErrorKind, operation:str, subject:str?, detail:str) Error {
+    return Error(kind:kind, operation:operation, subject:subject, detail:detail)
+}

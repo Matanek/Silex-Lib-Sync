@@ -1,0 +1,532 @@
+use Sync
+use STD.Error as StandardError
+use STD.IO
+use STD.Network
+use STD.Network.TCP
+use STD.Text.UTF8
+
+public struct Options {
+    let maximum_message_bytes:int
+    let backlog:int
+    let connect_timeout_milliseconds:int?
+    let accept_timeout_milliseconds:int?
+    let read_timeout_milliseconds:int?
+    let write_timeout_milliseconds:int?
+
+    func with_message_limit(maximum_bytes:int) Options {
+        return Options(
+            maximum_message_bytes:maximum_bytes,
+            backlog:self.backlog,
+            connect_timeout_milliseconds:self.connect_timeout_milliseconds,
+            accept_timeout_milliseconds:self.accept_timeout_milliseconds,
+            read_timeout_milliseconds:self.read_timeout_milliseconds,
+            write_timeout_milliseconds:self.write_timeout_milliseconds
+        )
+    }
+
+    func with_backlog(value:int) Options {
+        return Options(
+            maximum_message_bytes:self.maximum_message_bytes,
+            backlog:value,
+            connect_timeout_milliseconds:self.connect_timeout_milliseconds,
+            accept_timeout_milliseconds:self.accept_timeout_milliseconds,
+            read_timeout_milliseconds:self.read_timeout_milliseconds,
+            write_timeout_milliseconds:self.write_timeout_milliseconds
+        )
+    }
+
+    func with_connect_timeout(milliseconds:int?) Options {
+        return Options(
+            maximum_message_bytes:self.maximum_message_bytes,
+            backlog:self.backlog,
+            connect_timeout_milliseconds:milliseconds,
+            accept_timeout_milliseconds:self.accept_timeout_milliseconds,
+            read_timeout_milliseconds:self.read_timeout_milliseconds,
+            write_timeout_milliseconds:self.write_timeout_milliseconds
+        )
+    }
+
+    func with_accept_timeout(milliseconds:int?) Options {
+        return Options(
+            maximum_message_bytes:self.maximum_message_bytes,
+            backlog:self.backlog,
+            connect_timeout_milliseconds:self.connect_timeout_milliseconds,
+            accept_timeout_milliseconds:milliseconds,
+            read_timeout_milliseconds:self.read_timeout_milliseconds,
+            write_timeout_milliseconds:self.write_timeout_milliseconds
+        )
+    }
+
+    func with_read_timeout(milliseconds:int?) Options {
+        return Options(
+            maximum_message_bytes:self.maximum_message_bytes,
+            backlog:self.backlog,
+            connect_timeout_milliseconds:self.connect_timeout_milliseconds,
+            accept_timeout_milliseconds:self.accept_timeout_milliseconds,
+            read_timeout_milliseconds:milliseconds,
+            write_timeout_milliseconds:self.write_timeout_milliseconds
+        )
+    }
+
+    func with_write_timeout(milliseconds:int?) Options {
+        return Options(
+            maximum_message_bytes:self.maximum_message_bytes,
+            backlog:self.backlog,
+            connect_timeout_milliseconds:self.connect_timeout_milliseconds,
+            accept_timeout_milliseconds:self.accept_timeout_milliseconds,
+            read_timeout_milliseconds:self.read_timeout_milliseconds,
+            write_timeout_milliseconds:milliseconds
+        )
+    }
+
+    func without_timeouts() Options {
+        return Options(
+            maximum_message_bytes:self.maximum_message_bytes,
+            backlog:self.backlog,
+            connect_timeout_milliseconds:null,
+            accept_timeout_milliseconds:null,
+            read_timeout_milliseconds:null,
+            write_timeout_milliseconds:null
+        )
+    }
+}
+
+public func default_options() Options {
+    return Options(
+        maximum_message_bytes:1024 * 1024,
+        backlog:128,
+        connect_timeout_milliseconds:10_000,
+        accept_timeout_milliseconds:null,
+        read_timeout_milliseconds:null,
+        write_timeout_milliseconds:10_000
+    )
+}
+
+public class Connection {
+    private var stream:TCP.Stream?
+    private let message_limit:int
+
+    package init(value:TCP.Stream, maximum_message_bytes:int) {
+        self.stream = value
+        self.message_limit = maximum_message_bytes
+    }
+
+    func is_closed() bool { return self.stream == null }
+
+    func send(channel:uint16, payload:@uint8[..]) Result<void, Sync.Error> {
+        if payload.count() > self.message_limit {
+            return Result<void, Sync.Error>.failure(Sync.failure(
+                Sync.ErrorKind.message_limit,
+                "sync.session.send",
+                null,
+                "message payload exceeds maximum_message_bytes"
+            ))
+        }
+        if var connection = self.stream {
+            let header = encode_header(channel, payload.count())
+            match IO.write_all<TCP.Stream>(connection, @header[0:header.count()]) {
+                success => {}
+                failure(error) => {
+                    let failure = network_error("sync.session.send", error)
+                    self.invalidate()
+                    return Result<void, Sync.Error>.failure(failure)
+                }
+            }
+            if !payload.is_empty() {
+                match IO.write_all<TCP.Stream>(connection, payload) {
+                    success => {}
+                    failure(error) => {
+                        let failure = network_error("sync.session.send", error)
+                        self.invalidate()
+                        return Result<void, Sync.Error>.failure(failure)
+                    }
+                }
+            }
+            return Result<void, Sync.Error>.success()
+        }
+        return Result<void, Sync.Error>.failure(closed_error("sync.session.send"))
+    }
+
+    func send_text(channel:uint16, text:str) Result<void, Sync.Error> {
+        let bytes = UTF8.bytes(text)
+        return self.send(channel, @bytes[0:bytes.count()])
+    }
+
+    func receive() Result<Sync.Message, Sync.Error> {
+        if var connection = self.stream {
+            var header:uint8[12]
+            match IO.read_exact<TCP.Stream>(connection, &header[0:header.count()]) {
+                success => {}
+                failure(error) => {
+                    let failure = network_error("sync.session.receive", error)
+                    self.invalidate()
+                    return Result<Sync.Message, Sync.Error>.failure(failure)
+                }
+            }
+            var decoded = FrameHeader(channel:0, payload_bytes:0)
+            match decode_header(@header[0:header.count()]) {
+                success(value) => { decoded = value }
+                failure(error) => {
+                    self.invalidate()
+                    return Result<Sync.Message, Sync.Error>.failure(error)
+                }
+            }
+            if decoded.payload_bytes > self.message_limit {
+                self.invalidate()
+                return Result<Sync.Message, Sync.Error>.failure(Sync.failure(
+                    Sync.ErrorKind.message_limit,
+                    "sync.session.receive",
+                    null,
+                    "peer declared a message larger than maximum_message_bytes"
+                ))
+            }
+            var payload:uint8[] = []
+            var index = 0
+            while index < decoded.payload_bytes {
+                payload.append(0 as uint8)
+                index++
+            }
+            if !payload.is_empty() {
+                match IO.read_exact<TCP.Stream>(connection, &payload[0:payload.count()]) {
+                    success => {}
+                    failure(error) => {
+                        let failure = network_error("sync.session.receive", error)
+                        self.invalidate()
+                        return Result<Sync.Message, Sync.Error>.failure(failure)
+                    }
+                }
+            }
+            return Result<Sync.Message, Sync.Error>.success(Sync.Message(
+                channel:decoded.channel,
+                payload:payload
+            ))
+        }
+        return Result<Sync.Message, Sync.Error>.failure(closed_error("sync.session.receive"))
+    }
+
+    func local_endpoint() Result<Network.Endpoint, Sync.Error> {
+        if var connection = self.stream {
+            match connection.local_endpoint() {
+                success(value) => { return Result<Network.Endpoint, Sync.Error>.success(value) }
+                failure(error) => { return Result<Network.Endpoint, Sync.Error>.failure(network_error(
+                    "sync.session.local_endpoint", error
+                )) }
+            }
+        }
+        return Result<Network.Endpoint, Sync.Error>.failure(closed_error(
+            "sync.session.local_endpoint"
+        ))
+    }
+
+    func peer_endpoint() Result<Network.Endpoint, Sync.Error> {
+        if var connection = self.stream {
+            match connection.peer_endpoint() {
+                success(value) => { return Result<Network.Endpoint, Sync.Error>.success(value) }
+                failure(error) => { return Result<Network.Endpoint, Sync.Error>.failure(network_error(
+                    "sync.session.peer_endpoint", error
+                )) }
+            }
+        }
+        return Result<Network.Endpoint, Sync.Error>.failure(closed_error(
+            "sync.session.peer_endpoint"
+        ))
+    }
+
+    func close() Result<void, Sync.Error> {
+        if var connection = self.stream {
+            self.stream = null
+            match TCP.close(move connection) {
+                success => { return Result<void, Sync.Error>.success() }
+                failure(error) => { return Result<void, Sync.Error>.failure(network_error(
+                    "sync.session.close", error
+                )) }
+            }
+        }
+        return Result<void, Sync.Error>.success()
+    }
+
+    private func invalidate() {
+        match self.close() { success => {}; failure(error) => {} }
+    }
+
+    drop { self.invalidate() }
+}
+
+public class Listener {
+    private var socket:TCP.Listener?
+    private let options:Options
+
+    package init(value:TCP.Listener, options:Options) {
+        self.socket = value
+        self.options = options
+    }
+
+    func is_closed() bool { return self.socket == null }
+
+    func local_endpoint() Result<Network.Endpoint, Sync.Error> {
+        if var listener = self.socket {
+            match TCP.local_endpoint(listener) {
+                success(value) => { return Result<Network.Endpoint, Sync.Error>.success(value) }
+                failure(error) => { return Result<Network.Endpoint, Sync.Error>.failure(network_error(
+                    "sync.session.listener_endpoint", error
+                )) }
+            }
+        }
+        return Result<Network.Endpoint, Sync.Error>.failure(closed_error(
+            "sync.session.listener_endpoint"
+        ))
+    }
+
+    func accept() Result<Connection, Sync.Error> {
+        if var listener = self.socket {
+            match TCP.accept(
+                listener,
+                self.options.accept_timeout_milliseconds,
+                tcp_stream_options(self.options)
+            ) {
+                success(accepted) => {
+                    return Result<Connection, Sync.Error>.success(Connection(
+                        accepted.stream,
+                        self.options.maximum_message_bytes
+                    ))
+                }
+                failure(error) => { return Result<Connection, Sync.Error>.failure(network_error(
+                    "sync.session.accept", error
+                )) }
+            }
+        }
+        return Result<Connection, Sync.Error>.failure(closed_error("sync.session.accept"))
+    }
+
+    func close() Result<void, Sync.Error> {
+        if var listener = self.socket {
+            self.socket = null
+            match TCP.close(move listener) {
+                success => { return Result<void, Sync.Error>.success() }
+                failure(error) => { return Result<void, Sync.Error>.failure(network_error(
+                    "sync.session.listener_close", error
+                )) }
+            }
+        }
+        return Result<void, Sync.Error>.success()
+    }
+
+    drop { match self.close() { success => {}; failure(error) => {} } }
+}
+
+public func connect_endpoint(endpoint:Network.Endpoint) Result<Connection, Sync.Error> {
+    return connect_endpoint(endpoint, default_options())
+}
+
+public func connect_endpoint(
+    endpoint:Network.Endpoint,
+    options:Options
+) Result<Connection, Sync.Error> {
+    try validate_options(options)
+    match TCP.connect(endpoint, TCP.ConnectOptions(
+        connect_timeout_milliseconds:options.connect_timeout_milliseconds,
+        stream:tcp_stream_options(options)
+    )) {
+        success(stream) => {
+            return Result<Connection, Sync.Error>.success(Connection(
+                stream,
+                options.maximum_message_bytes
+            ))
+        }
+        failure(error) => { return Result<Connection, Sync.Error>.failure(network_error(
+            "sync.session.connect", error
+        )) }
+    }
+}
+
+public func connect(host:str, port:uint16) Result<Connection, Sync.Error> {
+    return connect(host, port, default_options())
+}
+
+public func connect(host:str, port:uint16, options:Options) Result<Connection, Sync.Error> {
+    try validate_options(options)
+    match TCP.connect(host, port, TCP.ConnectOptions(
+        connect_timeout_milliseconds:options.connect_timeout_milliseconds,
+        stream:tcp_stream_options(options)
+    )) {
+        success(stream) => {
+            return Result<Connection, Sync.Error>.success(Connection(
+                stream,
+                options.maximum_message_bytes
+            ))
+        }
+        failure(error) => { return Result<Connection, Sync.Error>.failure(network_error(
+            "sync.session.connect", error
+        )) }
+    }
+}
+
+public func listen_endpoint(endpoint:Network.Endpoint) Result<Listener, Sync.Error> {
+    return listen_endpoint(endpoint, default_options())
+}
+
+public func listen_endpoint(
+    endpoint:Network.Endpoint,
+    options:Options
+) Result<Listener, Sync.Error> {
+    try validate_options(options)
+    match TCP.listen(endpoint, options.backlog) {
+        success(listener) => {
+            return Result<Listener, Sync.Error>.success(Listener(listener, options))
+        }
+        failure(error) => { return Result<Listener, Sync.Error>.failure(network_error(
+            "sync.session.listen", error
+        )) }
+    }
+}
+
+public func listen(host:str, port:uint16) Result<Listener, Sync.Error> {
+    return listen(host, port, default_options())
+}
+
+public func listen(host:str, port:uint16, options:Options) Result<Listener, Sync.Error> {
+    var address = Network.IpAddress.ipv4([0, 0, 0, 0])
+    match Network.parse_ip(host) {
+        success(value) => { address = value }
+        failure(error) => {
+            return Result<Listener, Sync.Error>.failure(Sync.failure(
+                Sync.ErrorKind.invalid_configuration,
+                "sync.session.listen",
+                host,
+                "listener host must be a numeric IPv4 or IPv6 address"
+            ))
+        }
+    }
+    return listen_endpoint(Network.Endpoint(address:address, port:port, scope_id:0), options)
+}
+
+package struct FrameHeader {
+    let channel:uint16
+    let payload_bytes:int
+}
+
+package func encode_header(channel:uint16, payload_bytes:int) uint8[12] {
+    let length = payload_bytes as uint32
+    var result:uint8[12]
+    result[0] = 83
+    result[1] = 89
+    result[2] = 78
+    result[3] = 67
+    result[4] = 1
+    result[5] = 0
+    result[6] = (channel >> 8) as uint8
+    result[7] = (channel & 255) as uint8
+    result[8] = (length >> 24) as uint8
+    result[9] = ((length >> 16) & 255) as uint8
+    result[10] = ((length >> 8) & 255) as uint8
+    result[11] = (length & 255) as uint8
+    return result
+}
+
+package func decode_header(bytes:@uint8[..]) Result<FrameHeader, Sync.Error> {
+    if bytes.count() != 12 {
+        return Result<FrameHeader, Sync.Error>.failure(Sync.failure(
+            Sync.ErrorKind.malformed_message,
+            "sync.session.receive",
+            null,
+            "Sync session frame header must contain 12 bytes"
+        ))
+    }
+    if bytes[0] != 83 || bytes[1] != 89 || bytes[2] != 78 || bytes[3] != 67 {
+        return Result<FrameHeader, Sync.Error>.failure(Sync.failure(
+            Sync.ErrorKind.malformed_message,
+            "sync.session.receive",
+            null,
+            "peer sent a message with an invalid Sync session signature"
+        ))
+    }
+    if bytes[4] != 1 {
+        return Result<FrameHeader, Sync.Error>.failure(Sync.failure(
+            Sync.ErrorKind.unsupported_version,
+            "sync.session.receive",
+            null,
+            "peer uses an unsupported Sync session protocol version"
+        ))
+    }
+    if bytes[5] != 0 {
+        return Result<FrameHeader, Sync.Error>.failure(Sync.failure(
+            Sync.ErrorKind.malformed_message,
+            "sync.session.receive",
+            null,
+            "peer set reserved Sync session frame flags"
+        ))
+    }
+    let channel = ((bytes[6] as uint16) << 8) + bytes[7] as uint16
+    let length:uint32 =
+        ((bytes[8] as uint32) << 24) +
+        ((bytes[9] as uint32) << 16) +
+        ((bytes[10] as uint32) << 8) +
+        bytes[11] as uint32
+    return Result<FrameHeader, Sync.Error>.success(FrameHeader(
+        channel:channel,
+        payload_bytes:length as int
+    ))
+}
+
+func validate_options(options:Options) Result<void, Sync.Error> {
+    if options.maximum_message_bytes <= 0 || options.maximum_message_bytes > 16 * 1024 * 1024 {
+        return Result<void, Sync.Error>.failure(Sync.failure(
+            Sync.ErrorKind.invalid_configuration,
+            "sync.session.options",
+            null,
+            "maximum_message_bytes must be between 1 and 16777216"
+        ))
+    }
+    if options.backlog <= 0 {
+        return Result<void, Sync.Error>.failure(Sync.failure(
+            Sync.ErrorKind.invalid_configuration,
+            "sync.session.options",
+            null,
+            "backlog must be positive"
+        ))
+    }
+    try validate_timeout(options.connect_timeout_milliseconds, "connect")
+    try validate_timeout(options.accept_timeout_milliseconds, "accept")
+    try validate_timeout(options.read_timeout_milliseconds, "read")
+    try validate_timeout(options.write_timeout_milliseconds, "write")
+    return Result<void, Sync.Error>.success()
+}
+
+func validate_timeout(value:int?, name:str) Result<void, Sync.Error> {
+    if let milliseconds = value {
+        if milliseconds < 0 {
+            return Result<void, Sync.Error>.failure(Sync.failure(
+                Sync.ErrorKind.invalid_configuration,
+                "sync.session.options",
+                name,
+                "session timeout must be non-negative"
+            ))
+        }
+    }
+    return Result<void, Sync.Error>.success()
+}
+
+func tcp_stream_options(options:Options) TCP.StreamOptions {
+    return TCP.StreamOptions(
+        read_timeout_milliseconds:options.read_timeout_milliseconds,
+        write_timeout_milliseconds:options.write_timeout_milliseconds
+    )
+}
+
+func closed_error(operation:str) Sync.Error {
+    return Sync.failure(Sync.ErrorKind.closed, operation, null, "Sync session is closed")
+}
+
+func network_error(operation:str, error:StandardError) Sync.Error {
+    var kind = Sync.ErrorKind.network
+    if error.kind == StandardError.Kind.timed_out || error.kind == StandardError.Kind.would_block {
+        kind = Sync.ErrorKind.timeout
+    } elif error.kind == StandardError.Kind.unexpected_end ||
+        error.kind == StandardError.Kind.broken_pipe ||
+        error.kind == StandardError.Kind.connection_aborted ||
+        error.kind == StandardError.Kind.connection_reset ||
+        error.kind == StandardError.Kind.not_connected {
+        kind = Sync.ErrorKind.closed
+    }
+    return Sync.failure(kind, operation, error.subject, error.detail)
+}
