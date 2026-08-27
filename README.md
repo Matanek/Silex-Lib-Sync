@@ -312,5 +312,8 @@ silex test Packages/Sync/Tests/Heartbeat.sx
 silex test Packages/Sync/Tests/Statistics.sx
 silex test Packages/Sync/Tests/SecureSession.sx
 silex test Packages/Sync/Tests/Consumer/Tests
-silex run Packages/Sync/Benchmarks/Freshness.sx
 ```
+
+The public
+[NetworkFreshnessTracking](https://github.com/Matanek/Silex-Benchmarks/blob/main/Sources/NetworkFreshnessTracking.sx)
+benchmark lives in `Silex-Benchmarks`.
