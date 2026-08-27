@@ -48,7 +48,7 @@ var by_endpoint = try Session.connect_endpoint(endpoint)
 `Connection.close` and `Listener.close` are explicit and idempotent; dropping
 either resource also closes its owned socket.
 
-See [MessageRoundTrip.sx](Examples/MessageRoundTrip.sx) for a complete,
+See [Docs/Recipes.md](Docs/Recipes.md#messageroundtrip) for a complete,
 self-contained client/server exchange.
 
 This is also the zero-configuration local-chat path. Bind the listener to
@@ -107,8 +107,8 @@ that has already leaked its invitation. Public Internet services that need
 named server identity, revocation or account recovery still need those policies
 above Sync.
 
-See [SecureChatRoundTrip.sx](Examples/SecureChatRoundTrip.sx) for a complete
-secure client/server chat. Its platform availability follows the distributed
+See the [secure chat recipe](Docs/Recipes.md#securechatroundtrip) for a complete
+client/server exchange. Its platform availability follows the distributed
 targets supported by the linked STD package.
 
 ## Freshness-first datagrams
@@ -214,7 +214,7 @@ match lifecycle and other must-arrive commands on `Session` or
 older one. This separation avoids head-of-line blocking in visual state while
 keeping reliable application traffic simple.
 
-See [NetcodeHealthRoundTrip.sx](Examples/NetcodeHealthRoundTrip.sx) for a
+See the [Netcode health recipe](Docs/Recipes.md#netcodehealthroundtrip) for a
 complete loopback ping/pong and liveness update.
 
 The default payload limit is 1,200 bytes, a conservative size chosen to reduce
@@ -223,8 +223,8 @@ larger allowed payload does not make large UDP packets suitable for the public
 Internet. `Netcode.bind` accepts numeric IPv4 or IPv6 addresses; `bind_endpoint`
 and `open` support already resolved endpoints and client-style sockets.
 
-See [NetcodeRoundTrip.sx](Examples/NetcodeRoundTrip.sx) for a complete loopback
-exchange.
+See the [Netcode recipe](Docs/Recipes.md#netcoderoundtrip) for a complete
+loopback exchange.
 
 ## Configure resource policy
 
@@ -312,9 +312,5 @@ silex test Packages/Sync/Tests/Heartbeat.sx
 silex test Packages/Sync/Tests/Statistics.sx
 silex test Packages/Sync/Tests/SecureSession.sx
 silex test Packages/Sync/Tests/Consumer/Tests
-silex run Packages/Sync/Examples/MessageRoundTrip.sx
-silex run Packages/Sync/Examples/SecureChatRoundTrip.sx
-silex run Packages/Sync/Examples/NetcodeRoundTrip.sx
-silex run Packages/Sync/Examples/NetcodeHealthRoundTrip.sx
 silex run Packages/Sync/Benchmarks/Freshness.sx
 ```
