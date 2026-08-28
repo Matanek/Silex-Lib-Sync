@@ -12,5 +12,4 @@ silex install Sync
 - [Documentation française](Docs/FR/README.md)
 - [English documentation](Docs/EN/README.md)
 
-Le package nécessite Silex 0.39 ou une version ultérieure. Il n’est pas encore
-publié dans le registre ; utilisez `silex link Packages/Sync` en attendant.
+Le package nécessite Silex 0.43.0 ou une version ultérieure.

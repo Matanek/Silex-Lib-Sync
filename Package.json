@@ -1,13 +1,13 @@
 {
   "name": "Sync",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": {
     "en": "Persistent communication and shared-state synchronization for games and interactive applications.",
     "fr": "Communication persistante et synchronisation d’état partagé pour les jeux et applications interactives."
   },
   "authors": ["Matanek"],
   "requires": {
-    "silex": ">=0.42.0"
+    "silex": ">=0.43.0"
   },
   "dependencies": {
     "STD": "^0.19.0"
