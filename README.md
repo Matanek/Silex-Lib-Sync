@@ -1,7 +1,7 @@
 # Sync
 
-`Sync` fournit des communications persistantes pour les jeux et applications
-interactives : messages TCP, sessions chiffrées et datagrammes UDP.
+`Sync` provides persistent communication for games and interactive
+applications: TCP messages, encrypted sessions, and UDP datagrams.
 
 ```text
 silex install Sync
@@ -9,7 +9,7 @@ silex install Sync
 
 ## Documentation
 
-- [Documentation française](Docs/FR/README.md)
+- [French documentation](Docs/FR/README.md)
 - [English documentation](Docs/EN/README.md)
 
-Le package nécessite Silex 0.43.0 ou une version ultérieure.
+The package requires Silex 0.43.0 or newer.
