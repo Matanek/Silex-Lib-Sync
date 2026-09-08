@@ -1,6 +1,6 @@
 {
   "name": "Sync",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": {
     "en": "Persistent communication and shared-state synchronization for games and interactive applications.",
     "fr": "Communication persistante et synchronisation d’état partagé pour les jeux et applications interactives."
