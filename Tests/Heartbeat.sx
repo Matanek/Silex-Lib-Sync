@@ -29,7 +29,7 @@ test "schedule heartbeat sends and detect an unresponsive peer" {
     let options = Heartbeat.default_options()
         .with_interval(100)
         .with_timeout(500)
-    var state = require_state(Heartbeat.state(options, 1_000))
+    var state = require_state((try Heartbeat.state(options, 1_000)))
 
     assert(state.status(1_000) == Heartbeat.Status.waiting)
     assert(state.should_send(1_000))
@@ -50,39 +50,39 @@ test "time out a peer that never answers and reject invalid heartbeat policies" 
     let options = Heartbeat.default_options()
         .with_interval(100)
         .with_timeout(300)
-    let state = require_state(Heartbeat.state(options, 5_000))
+    let state = require_state((try Heartbeat.state(options, 5_000)))
     assert(state.status(5_299) == Heartbeat.Status.waiting)
     assert(state.status(5_300) == Heartbeat.Status.timed_out)
     assert(state.milliseconds_since_receive(5_300) == null)
 
-    match Heartbeat.state(options.with_interval(0), 0) {
+    match (try Heartbeat.state(options.with_interval(0), 0)) {
         success(value) => { panic("zero heartbeat interval should fail") }
         failure(error) => { assert(error.kind == Sync.ErrorKind.invalid_configuration) }
     }
-    match Heartbeat.state(options.with_timeout(99), 0) {
+    match (try Heartbeat.state(options.with_timeout(99), 0)) {
         success(value) => { panic("heartbeat timeout below its interval should fail") }
         failure(error) => { assert(error.kind == Sync.ErrorKind.invalid_configuration) }
     }
-    match Heartbeat.state(options, -1) {
+    match (try Heartbeat.state(options, -1)) {
         success(value) => { panic("negative heartbeat start should fail") }
         failure(error) => { assert(error.kind == Sync.ErrorKind.invalid_configuration) }
     }
 }
 
 test "encode ping pong pulses and measure their round trip" {
-    let request = require_pulse(Heartbeat.ping(1_000))
+    let request = require_pulse((try Heartbeat.ping(1_000)))
     let encoded_request = Heartbeat.encode(request)
-    let decoded_request = require_pulse(Heartbeat.decode(@encoded_request[0:16]))
+    let decoded_request = require_pulse((try Heartbeat.decode(@encoded_request[0:16])))
     assert(decoded_request.kind == Heartbeat.PulseKind.ping)
-    let response = require_pulse(Heartbeat.pong(decoded_request))
+    let response = require_pulse((try Heartbeat.pong(decoded_request)))
     let encoded_response = Heartbeat.encode(response)
-    let decoded_response = require_pulse(Heartbeat.decode(@encoded_response[0:16]))
+    let decoded_response = require_pulse((try Heartbeat.decode(@encoded_response[0:16])))
     assert(decoded_response.kind == Heartbeat.PulseKind.pong)
-    assert(require_duration(Heartbeat.round_trip_milliseconds(decoded_response, 1_042)) == 42)
+    assert(require_duration((try Heartbeat.round_trip_milliseconds(decoded_response, 1_042))) == 42)
 
     var malformed = encoded_response
     malformed[0] = 0
-    match Heartbeat.decode(@malformed[0:16]) {
+    match (try Heartbeat.decode(@malformed[0:16])) {
         success(value) => { panic("malformed heartbeat should fail") }
         failure(error) => { assert(error.kind == Sync.ErrorKind.malformed_message) }
     }

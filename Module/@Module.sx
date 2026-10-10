@@ -30,7 +30,7 @@ public struct Message {
 
     func text() Result<str, Error> {
         if self.payload.is_empty() { return Result<str, Error>.success("") }
-        match UTF8.decode(@self.payload[0:self.payload.count()]) {
+        match (try UTF8.decode(@self.payload[0:self.payload.count()])) {
             success(value) => { return Result<str, Error>.success(value) }
             failure(error) => {
                 return Result<str, Error>.failure(failure(

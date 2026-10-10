@@ -30,11 +30,11 @@ public struct Tracker {
     func is_full() bool { return self.stream_count() >= self.maximum_streams }
 
     func observe(value:@Netcode.Received) Result<Decision, Sync.Error> {
-        return self.observe_sequence(value.sender, value.channel, value.sequence)
+        return (try self.observe_sequence(value.sender, value.channel, value.sequence))
     }
 
     func observe(value:@Netcode.Datagram) Result<Decision, Sync.Error> {
-        return self.observe_sequence(value.sender, value.channel, value.sequence)
+        return (try self.observe_sequence(value.sender, value.channel, value.sequence))
     }
 
     func observe_sequence(
@@ -92,7 +92,7 @@ public struct Tracker {
 }
 
 public func tracker() Result<Tracker, Sync.Error> {
-    return tracker(256)
+    return (try tracker(256))
 }
 
 public func tracker(maximum_streams:int) Result<Tracker, Sync.Error> {

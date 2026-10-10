@@ -10,7 +10,7 @@ package struct KeyPair {
 }
 
 package func key_pair(seed:@uint8[..]) Result<KeyPair, Sync.Error> {
-    match X25519.key_pair(seed) {
+    match (try X25519.key_pair(seed)) {
         success(pair) => {
             return Result<KeyPair, Sync.Error>.success(KeyPair(
                 secret:pair.secret,
@@ -31,7 +31,7 @@ package func shared_secret(
     secret:@uint8[..],
     peer_public_key:@uint8[..]
 ) Result<uint8[32], Sync.Error> {
-    match X25519.shared_secret(secret, peer_public_key) {
+    match (try X25519.shared_secret(secret, peer_public_key)) {
         success(value) => { return Result<uint8[32], Sync.Error>.success(value) }
         failure(error) => {
             return Result<uint8[32], Sync.Error>.failure(Sync.failure(
@@ -51,7 +51,7 @@ package func derive(
     context:@uint8[..],
     output_count:int
 ) Result<uint8[], Sync.Error> {
-    match HKDF.derive_sha256(input, salt, context, output_count) {
+    match (try HKDF.derive_sha256(input, salt, context, output_count)) {
         success(value) => { return Result<uint8[], Sync.Error>.success(value) }
         failure(error) => {
             return Result<uint8[], Sync.Error>.failure(cryptography_error(
@@ -69,7 +69,7 @@ package func seal(
     associated:@uint8[..],
     message:@uint8[..]
 ) Result<uint8[], Sync.Error> {
-    match ChaCha20Poly1305.seal(key, nonce, associated, message) {
+    match (try ChaCha20Poly1305.seal(key, nonce, associated, message)) {
         success(value) => { return Result<uint8[], Sync.Error>.success(value) }
         failure(error) => {
             return Result<uint8[], Sync.Error>.failure(cryptography_error(
@@ -87,7 +87,7 @@ package func open(
     associated:@uint8[..],
     sealed:@uint8[..]
 ) Result<uint8[], Sync.Error> {
-    match ChaCha20Poly1305.open(key, nonce, associated, sealed) {
+    match (try ChaCha20Poly1305.open(key, nonce, associated, sealed)) {
         success(value) => { return Result<uint8[], Sync.Error>.success(value) }
         failure(error) => {
             if error.kind == StandardCrypto.ErrorKind.authentication_failed {

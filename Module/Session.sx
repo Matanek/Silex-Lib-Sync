@@ -123,7 +123,7 @@ public class Connection {
         }
         if var connection = self.stream {
             let header = encode_header(channel, payload.count())
-            match IO.write_all<TCP.Stream>(connection, @header[0:header.count()]) {
+            match (try IO.write_all<TCP.Stream>(connection, @header[0:header.count()])) {
                 success => {}
                 failure(error) => {
                     let failure = Sync.network_failure("sync.session.send", error)
@@ -132,7 +132,7 @@ public class Connection {
                 }
             }
             if !payload.is_empty() {
-                match IO.write_all<TCP.Stream>(connection, payload) {
+                match (try IO.write_all<TCP.Stream>(connection, payload)) {
                     success => {}
                     failure(error) => {
                         let failure = Sync.network_failure("sync.session.send", error)
@@ -148,13 +148,13 @@ public class Connection {
 
     func send_text(channel:uint16, text:str) Result<void, Sync.Error> {
         let bytes = UTF8.bytes(text)
-        return self.send(channel, @bytes[0:bytes.count()])
+        return (try self.send(channel, @bytes[0:bytes.count()]))
     }
 
     func receive() Result<Sync.Message, Sync.Error> {
         if var connection = self.stream {
             var header:uint8[12]
-            match IO.read_exact<TCP.Stream>(connection, &header[0:header.count()]) {
+            match (try IO.read_exact<TCP.Stream>(connection, &header[0:header.count()])) {
                 success => {}
                 failure(error) => {
                     let failure = Sync.network_failure("sync.session.receive", error)
@@ -163,7 +163,7 @@ public class Connection {
                 }
             }
             var decoded = FrameHeader(channel:0, payload_bytes:0)
-            match decode_header(@header[0:header.count()]) {
+            match (try decode_header(@header[0:header.count()])) {
                 success(value) => { decoded = value }
                 failure(error) => {
                     self.invalidate()
@@ -186,7 +186,7 @@ public class Connection {
                 index++
             }
             if !payload.is_empty() {
-                match IO.read_exact<TCP.Stream>(connection, &payload[0:payload.count()]) {
+                match (try IO.read_exact<TCP.Stream>(connection, &payload[0:payload.count()])) {
                     success => {}
                     failure(error) => {
                         let failure = Sync.network_failure("sync.session.receive", error)
@@ -205,7 +205,7 @@ public class Connection {
 
     func local_endpoint() Result<Network.Endpoint, Sync.Error> {
         if var connection = self.stream {
-            match connection.local_endpoint() {
+            match (try connection.local_endpoint()) {
                 success(value) => { return Result<Network.Endpoint, Sync.Error>.success(value) }
                 failure(error) => { return Result<Network.Endpoint, Sync.Error>.failure(Sync.network_failure(
                     "sync.session.local_endpoint", error
@@ -219,7 +219,7 @@ public class Connection {
 
     func peer_endpoint() Result<Network.Endpoint, Sync.Error> {
         if var connection = self.stream {
-            match connection.peer_endpoint() {
+            match (try connection.peer_endpoint()) {
                 success(value) => { return Result<Network.Endpoint, Sync.Error>.success(value) }
                 failure(error) => { return Result<Network.Endpoint, Sync.Error>.failure(Sync.network_failure(
                     "sync.session.peer_endpoint", error
@@ -234,7 +234,7 @@ public class Connection {
     func close() Result<void, Sync.Error> {
         if var connection = self.stream {
             self.stream = null
-            match TCP.close(move connection) {
+            match (try TCP.close(move connection)) {
                 success => { return Result<void, Sync.Error>.success() }
                 failure(error) => { return Result<void, Sync.Error>.failure(Sync.network_failure(
                     "sync.session.close", error
@@ -245,7 +245,7 @@ public class Connection {
     }
 
     private func invalidate() {
-        match self.close() { success => {}; failure(error) => {} }
+        match (try self.close()) { success => {}; failure(error) => {} }
     }
 
     drop { self.invalidate() }
@@ -264,7 +264,7 @@ public class Listener {
 
     func local_endpoint() Result<Network.Endpoint, Sync.Error> {
         if var listener = self.socket {
-            match TCP.local_endpoint(listener) {
+            match (try TCP.local_endpoint(listener)) {
                 success(value) => { return Result<Network.Endpoint, Sync.Error>.success(value) }
                 failure(error) => { return Result<Network.Endpoint, Sync.Error>.failure(Sync.network_failure(
                     "sync.session.listener_endpoint", error
@@ -278,11 +278,11 @@ public class Listener {
 
     func accept() Result<Connection, Sync.Error> {
         if var listener = self.socket {
-            match TCP.accept(
+            match (try TCP.accept(
                 listener,
                 self.options.accept_timeout_milliseconds,
                 tcp_stream_options(self.options)
-            ) {
+            )) {
                 success(accepted) => {
                     return Result<Connection, Sync.Error>.success(Connection(
                         accepted.stream,
@@ -300,7 +300,7 @@ public class Listener {
     func close() Result<void, Sync.Error> {
         if var listener = self.socket {
             self.socket = null
-            match TCP.close(move listener) {
+            match (try TCP.close(move listener)) {
                 success => { return Result<void, Sync.Error>.success() }
                 failure(error) => { return Result<void, Sync.Error>.failure(Sync.network_failure(
                     "sync.session.listener_close", error
@@ -310,22 +310,22 @@ public class Listener {
         return Result<void, Sync.Error>.success()
     }
 
-    drop { match self.close() { success => {}; failure(error) => {} } }
+    drop { match (try self.close()) { success => {}; failure(error) => {} } }
 }
 
 public func connect_endpoint(endpoint:Network.Endpoint) Result<Connection, Sync.Error> {
-    return connect_endpoint(endpoint, default_options())
+    return (try connect_endpoint(endpoint, default_options()))
 }
 
 public func connect_endpoint(
     endpoint:Network.Endpoint,
     options:Options
 ) Result<Connection, Sync.Error> {
-    try validate_options(options)
-    match TCP.connect(endpoint, TCP.ConnectOptions(
+    try validate_options(options) else error { return Result<Connection,Sync.Error>.failure(error) }
+    match (try TCP.connect(endpoint, TCP.ConnectOptions(
         connect_timeout_milliseconds:options.connect_timeout_milliseconds,
         stream:tcp_stream_options(options)
-    )) {
+    ))) {
         success(stream) => {
             return Result<Connection, Sync.Error>.success(Connection(
                 stream,
@@ -339,15 +339,15 @@ public func connect_endpoint(
 }
 
 public func connect(host:str, port:uint16) Result<Connection, Sync.Error> {
-    return connect(host, port, default_options())
+    return (try connect(host, port, default_options()))
 }
 
 public func connect(host:str, port:uint16, options:Options) Result<Connection, Sync.Error> {
-    try validate_options(options)
-    match TCP.connect(host, port, TCP.ConnectOptions(
+    try validate_options(options) else error { return Result<Connection,Sync.Error>.failure(error) }
+    match (try TCP.connect(host, port, TCP.ConnectOptions(
         connect_timeout_milliseconds:options.connect_timeout_milliseconds,
         stream:tcp_stream_options(options)
-    )) {
+    ))) {
         success(stream) => {
             return Result<Connection, Sync.Error>.success(Connection(
                 stream,
@@ -361,15 +361,15 @@ public func connect(host:str, port:uint16, options:Options) Result<Connection, S
 }
 
 public func listen_endpoint(endpoint:Network.Endpoint) Result<Listener, Sync.Error> {
-    return listen_endpoint(endpoint, default_options())
+    return (try listen_endpoint(endpoint, default_options()))
 }
 
 public func listen_endpoint(
     endpoint:Network.Endpoint,
     options:Options
 ) Result<Listener, Sync.Error> {
-    try validate_options(options)
-    match TCP.listen(endpoint, options.backlog) {
+    try validate_options(options) else error { return Result<Listener,Sync.Error>.failure(error) }
+    match (try TCP.listen(endpoint, options.backlog)) {
         success(listener) => {
             return Result<Listener, Sync.Error>.success(Listener(listener, options))
         }
@@ -380,12 +380,12 @@ public func listen_endpoint(
 }
 
 public func listen(host:str, port:uint16) Result<Listener, Sync.Error> {
-    return listen(host, port, default_options())
+    return (try listen(host, port, default_options()))
 }
 
 public func listen(host:str, port:uint16, options:Options) Result<Listener, Sync.Error> {
     var address = Network.IpAddress.ipv4([0, 0, 0, 0])
-    match Network.parse_ip(host) {
+    match (try Network.parse_ip(host)) {
         success(value) => { address = value }
         failure(error) => {
             return Result<Listener, Sync.Error>.failure(Sync.failure(
@@ -396,7 +396,7 @@ public func listen(host:str, port:uint16, options:Options) Result<Listener, Sync
             ))
         }
     }
-    return listen_endpoint(Network.Endpoint(address:address, port:port, scope_id:0), options)
+    return (try listen_endpoint(Network.Endpoint(address:address, port:port, scope_id:0), options))
 }
 
 package struct FrameHeader {
@@ -484,10 +484,10 @@ func validate_options(options:Options) Result<void, Sync.Error> {
             "backlog must be positive"
         ))
     }
-    try validate_timeout(options.connect_timeout_milliseconds, "connect")
-    try validate_timeout(options.accept_timeout_milliseconds, "accept")
-    try validate_timeout(options.read_timeout_milliseconds, "read")
-    try validate_timeout(options.write_timeout_milliseconds, "write")
+    try validate_timeout(options.connect_timeout_milliseconds, "connect") else error { return Result<void,Sync.Error>.failure(error) }
+    try validate_timeout(options.accept_timeout_milliseconds, "accept") else error { return Result<void,Sync.Error>.failure(error) }
+    try validate_timeout(options.read_timeout_milliseconds, "read") else error { return Result<void,Sync.Error>.failure(error) }
+    try validate_timeout(options.write_timeout_milliseconds, "write") else error { return Result<void,Sync.Error>.failure(error) }
     return Result<void, Sync.Error>.success()
 }
 

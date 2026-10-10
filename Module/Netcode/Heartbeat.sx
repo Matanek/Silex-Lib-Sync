@@ -92,11 +92,11 @@ public struct State {
 }
 
 public func state(started_at_milliseconds:int) Result<State, Sync.Error> {
-    return state(default_options(), started_at_milliseconds)
+    return (try state(default_options(), started_at_milliseconds))
 }
 
 public func state(options:Options, started_at_milliseconds:int) Result<State, Sync.Error> {
-    try validate(options)
+    try validate(options) else error { return Result<State,Sync.Error>.failure(error) }
     if started_at_milliseconds < 0 {
         return Result<State, Sync.Error>.failure(clock_error(
             "heartbeat start time must be non-negative"

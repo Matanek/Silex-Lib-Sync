@@ -22,7 +22,7 @@ test "encode and decode the stable Netcode datagram header" {
     assert(bytes[12] == 4 && bytes[13] == 176)
     assert(bytes[14] == 0 && bytes[15] == 0)
 
-    let header = require_header(Netcode.decode_header(@bytes[0:bytes.count()]))
+    let header = require_header((try Netcode.decode_header(@bytes[0:bytes.count()])))
     assert(header.channel == 513)
     assert(header.sequence == 16_909_060 as uint32)
     assert(header.payload_bytes == 1_200)
@@ -44,27 +44,27 @@ test "compare wrapped Netcode sequence numbers" {
 test "reject malformed Netcode datagram headers" {
     var invalid_signature = Netcode.encode_header(1, 0, 0)
     invalid_signature[0] = 0
-    match Netcode.decode_header(@invalid_signature[0:invalid_signature.count()]) {
+    match (try Netcode.decode_header(@invalid_signature[0:invalid_signature.count()])) {
         success(value) => { panic("invalid signature should fail") }
         failure(error) => { assert(error.kind == Sync.ErrorKind.malformed_message) }
     }
 
     var unsupported = Netcode.encode_header(1, 0, 0)
     unsupported[4] = 2
-    match Netcode.decode_header(@unsupported[0:unsupported.count()]) {
+    match (try Netcode.decode_header(@unsupported[0:unsupported.count()])) {
         success(value) => { panic("unsupported version should fail") }
         failure(error) => { assert(error.kind == Sync.ErrorKind.unsupported_version) }
     }
 
     var wrong_kind = Netcode.encode_header(1, 0, 0)
     wrong_kind[5] = 0
-    match Netcode.decode_header(@wrong_kind[0:wrong_kind.count()]) {
+    match (try Netcode.decode_header(@wrong_kind[0:wrong_kind.count()])) {
         success(value) => { panic("wrong datagram kind should fail") }
         failure(error) => { assert(error.kind == Sync.ErrorKind.malformed_message) }
     }
 
     let short:uint8[] = [83, 89, 78, 67]
-    match Netcode.decode_header(@short[0:short.count()]) {
+    match (try Netcode.decode_header(@short[0:short.count()])) {
         success(value) => { panic("short datagram header should fail") }
         failure(error) => { assert(error.kind == Sync.ErrorKind.malformed_message) }
     }

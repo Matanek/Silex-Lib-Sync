@@ -101,7 +101,7 @@ public class Host {
 
     func local_endpoint() Result<Network.Endpoint, Sync.Error> {
         if var transport = self.socket {
-            match UDP.local_endpoint(transport) {
+            match (try UDP.local_endpoint(transport)) {
                 success(endpoint) => { return Result<Network.Endpoint, Sync.Error>.success(endpoint) }
                 failure(error) => { return Result<Network.Endpoint, Sync.Error>.failure(
                     Sync.network_failure("sync.netcode.local_endpoint", error)
@@ -140,7 +140,7 @@ public class Host {
                 index++
             }
             let bytes = @self.send_buffer[0:16 + payload.count()]
-            match UDP.send_to(transport, bytes, destination) {
+            match (try UDP.send_to(transport, bytes, destination)) {
                 success => { return Result<void, Sync.Error>.success() }
                 failure(error) => { return Result<void, Sync.Error>.failure(
                     Sync.network_failure("sync.netcode.send", error)
@@ -152,7 +152,7 @@ public class Host {
 
     func receive() Result<Datagram, Sync.Error> {
         var received:WireReceived? = null
-        match self.receive_wire() {
+        match (try self.receive_wire()) {
             success(value) => { received = value }
             failure(error) => { return Result<Datagram, Sync.Error>.failure(error) }
         }
@@ -175,7 +175,7 @@ public class Host {
 
     func receive_into(output:&uint8[..]) Result<Received, Sync.Error> {
         var received:WireReceived? = null
-        match self.receive_wire() {
+        match (try self.receive_wire()) {
             success(value) => { received = value }
             failure(error) => { return Result<Received, Sync.Error>.failure(error) }
         }
@@ -206,7 +206,7 @@ public class Host {
     func close() Result<void, Sync.Error> {
         if var transport = self.socket {
             self.socket = null
-            match UDP.close(move transport) {
+            match (try UDP.close(move transport)) {
                 success => { return Result<void, Sync.Error>.success() }
                 failure(error) => { return Result<void, Sync.Error>.failure(
                     Sync.network_failure("sync.netcode.close", error)
@@ -220,7 +220,7 @@ public class Host {
         if var transport = self.socket {
             var buffer = self.receive_buffer
             var udp_result:UDP.Receive? = null
-            match receive_udp(transport, &buffer[0:buffer.count()]) {
+            match (try receive_udp(transport, &buffer[0:buffer.count()])) {
                 success(value) => { udp_result = value }
                 failure(error) => {
                     return Result<WireReceived, Sync.Error>.failure(error)
@@ -237,7 +237,7 @@ public class Host {
                     ))
                 }
                 var decoded:FrameHeader? = null
-                match decode_header(@self.receive_buffer[0:received.count]) {
+                match (try decode_header(@self.receive_buffer[0:received.count])) {
                     success(value) => { decoded = value }
                     failure(error) => {
                         return Result<WireReceived, Sync.Error>.failure(error)
@@ -273,16 +273,16 @@ public class Host {
         return Result<WireReceived, Sync.Error>.failure(closed_error("sync.netcode.receive"))
     }
 
-    drop { match self.close() { success => {}; failure(error) => {} } }
+    drop { match (try self.close()) { success => {}; failure(error) => {} } }
 }
 
 public func bind(host:str, port:uint16) Result<Host, Sync.Error> {
-    return bind(host, port, default_options())
+    return (try bind(host, port, default_options()))
 }
 
 public func bind(host:str, port:uint16, options:Options) Result<Host, Sync.Error> {
     var address = Network.IpAddress.ipv4([0, 0, 0, 0])
-    match Network.parse_ip(host) {
+    match (try Network.parse_ip(host)) {
         success(value) => { address = value }
         failure(error) => {
             return Result<Host, Sync.Error>.failure(Sync.failure(
@@ -293,16 +293,16 @@ public func bind(host:str, port:uint16, options:Options) Result<Host, Sync.Error
             ))
         }
     }
-    return bind_endpoint(Network.Endpoint(address:address, port:port, scope_id:0), options)
+    return (try bind_endpoint(Network.Endpoint(address:address, port:port, scope_id:0), options))
 }
 
 public func bind_endpoint(endpoint:Network.Endpoint) Result<Host, Sync.Error> {
-    return bind_endpoint(endpoint, default_options())
+    return (try bind_endpoint(endpoint, default_options()))
 }
 
 public func bind_endpoint(endpoint:Network.Endpoint, options:Options) Result<Host, Sync.Error> {
-    try validate_options(options)
-    match UDP.bind(endpoint, udp_options(options)) {
+    try validate_options(options) else error { return Result<Host,Sync.Error>.failure(error) }
+    match (try UDP.bind(endpoint, udp_options(options))) {
         success(socket) => { return Result<Host, Sync.Error>.success(Host(socket, options)) }
         failure(error) => { return Result<Host, Sync.Error>.failure(
             Sync.network_failure("sync.netcode.bind", error)
@@ -311,11 +311,11 @@ public func bind_endpoint(endpoint:Network.Endpoint, options:Options) Result<Hos
 }
 
 public func open(family:Network.Family) Result<Host, Sync.Error> {
-    return open(family, default_options())
+    return (try open(family, default_options()))
 }
 
 public func open(family:Network.Family, options:Options) Result<Host, Sync.Error> {
-    try validate_options(options)
+    try validate_options(options) else error { return Result<Host,Sync.Error>.failure(error) }
     if family == Network.Family.any {
         return Result<Host, Sync.Error>.failure(Sync.failure(
             Sync.ErrorKind.invalid_configuration,
@@ -324,7 +324,7 @@ public func open(family:Network.Family, options:Options) Result<Host, Sync.Error
             "Netcode host requires a concrete IPv4 or IPv6 family"
         ))
     }
-    match UDP.open(family, udp_options(options)) {
+    match (try UDP.open(family, udp_options(options))) {
         success(socket) => { return Result<Host, Sync.Error>.success(Host(socket, options)) }
         failure(error) => { return Result<Host, Sync.Error>.failure(
             Sync.network_failure("sync.netcode.open", error)
@@ -423,8 +423,8 @@ func validate_options(options:Options) Result<void, Sync.Error> {
             "maximum_payload_bytes must be between 1 and 65000"
         ))
     }
-    try validate_timeout(options.read_timeout_milliseconds, "read")
-    try validate_timeout(options.write_timeout_milliseconds, "write")
+    try validate_timeout(options.read_timeout_milliseconds, "read") else error { return Result<void,Sync.Error>.failure(error) }
+    try validate_timeout(options.write_timeout_milliseconds, "write") else error { return Result<void,Sync.Error>.failure(error) }
     return Result<void, Sync.Error>.success()
 }
 
@@ -453,7 +453,7 @@ func receive_udp(
     socket:&UDP.Socket,
     buffer:&uint8[..]
 ) Result<UDP.Receive, Sync.Error> {
-    match UDP.receive_from(socket, buffer) {
+    match (try UDP.receive_from(socket, buffer)) {
         success(value) => { return Result<UDP.Receive, Sync.Error>.success(value) }
         failure(error) => { return Result<UDP.Receive, Sync.Error>.failure(
             Sync.network_failure("sync.netcode.receive", error)

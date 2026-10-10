@@ -24,7 +24,7 @@ public struct SharedKey {
             encoded.append(hex_digit(byte >> 4))
             encoded.append(hex_digit(byte & 15))
         }
-        match UTF8.decode(@encoded[0:encoded.count()]) {
+        match (try UTF8.decode(@encoded[0:encoded.count()])) {
             success(value) => { return value }
             failure(error) => { panic("Sync secure key encoding produced invalid UTF-8") }
         }
@@ -128,8 +128,8 @@ public class Connection {
                 @nonce[0:12],
                 @associated[0:16],
                 payload
-            )
-            match connection.send(channel, @sealed[0:sealed.count()]) {
+            ) else error { return Result<void,Sync.Error>.failure(error) }
+            match (try connection.send(channel, @sealed[0:sealed.count()])) {
                 success => {
                     self.send_sequence++
                     return Result<void, Sync.Error>.success()
@@ -145,7 +145,7 @@ public class Connection {
 
     func send_text(channel:uint16, text:str) Result<void, Sync.Error> {
         let bytes = UTF8.bytes(text)
-        return self.send(channel, @bytes[0:bytes.count()])
+        return (try self.send(channel, @bytes[0:bytes.count()]))
     }
 
     func receive() Result<Sync.Message, Sync.Error> {
@@ -160,7 +160,7 @@ public class Connection {
         }
         if var connection = self.transport {
             var received:Sync.Message? = null
-            match connection.receive() {
+            match (try connection.receive()) {
                 failure(error) => {
                     self.invalidate()
                     return Result<Sync.Message, Sync.Error>.failure(error)
@@ -179,12 +179,12 @@ public class Connection {
                 }
                 let nonce = message_nonce(self.receive_direction, self.receive_sequence)
                 let associated = message_associated(message.channel, self.receive_sequence)
-                match Crypto.open(
+                match (try Crypto.open(
                     @self.receive_key[0:32],
                     @nonce[0:12],
                     @associated[0:16],
                     @message.payload[0:message.payload.count()]
-                ) {
+                )) {
                     failure(error) => {
                         self.invalidate()
                         return Result<Sync.Message, Sync.Error>.failure(error)
@@ -203,14 +203,14 @@ public class Connection {
     }
 
     func local_endpoint() Result<Network.Endpoint, Sync.Error> {
-        if var connection = self.transport { return connection.local_endpoint() }
+        if var connection = self.transport { return (try connection.local_endpoint()) }
         return Result<Network.Endpoint, Sync.Error>.failure(closed_error(
             "sync.secure.local_endpoint"
         ))
     }
 
     func peer_endpoint() Result<Network.Endpoint, Sync.Error> {
-        if var connection = self.transport { return connection.peer_endpoint() }
+        if var connection = self.transport { return (try connection.peer_endpoint()) }
         return Result<Network.Endpoint, Sync.Error>.failure(closed_error(
             "sync.secure.peer_endpoint"
         ))
@@ -219,12 +219,12 @@ public class Connection {
     func close() Result<void, Sync.Error> {
         if var connection = self.transport {
             self.transport = null
-            return connection.close()
+            return (try connection.close())
         }
         return Result<void, Sync.Error>.success()
     }
 
-    private func invalidate() { match self.close() { success => {}; failure(error) => {} } }
+    private func invalidate() { match (try self.close()) { success => {}; failure(error) => {} } }
 
     drop { self.invalidate() }
 }
@@ -243,7 +243,7 @@ public class Listener {
     func is_closed() bool { return self.transport == null }
 
     func local_endpoint() Result<Network.Endpoint, Sync.Error> {
-        if var listener = self.transport { return listener.local_endpoint() }
+        if var listener = self.transport { return (try listener.local_endpoint()) }
         return Result<Network.Endpoint, Sync.Error>.failure(closed_error(
             "sync.secure.listener_endpoint"
         ))
@@ -251,10 +251,10 @@ public class Listener {
 
     func accept() Result<Connection, Sync.Error> {
         if var listener = self.transport {
-            match listener.accept() {
+            match (try listener.accept()) {
                 failure(error) => { return Result<Connection, Sync.Error>.failure(error) }
                 success(connection) => {
-                    return finish_server_handshake(connection, self.key, self.options.maximum_message_bytes)
+                    return (try finish_server_handshake(connection, self.key, self.options.maximum_message_bytes))
                 }
             }
         }
@@ -264,16 +264,16 @@ public class Listener {
     func close() Result<void, Sync.Error> {
         if var listener = self.transport {
             self.transport = null
-            return listener.close()
+            return (try listener.close())
         }
         return Result<void, Sync.Error>.success()
     }
 
-    drop { match self.close() { success => {}; failure(error) => {} } }
+    drop { match (try self.close()) { success => {}; failure(error) => {} } }
 }
 
 public func connect(host:str, port:uint16, key:SharedKey) Result<Connection, Sync.Error> {
-    return connect(host, port, key, default_options())
+    return (try connect(host, port, key, default_options()))
 }
 
 public func connect(
@@ -282,11 +282,11 @@ public func connect(
     key:SharedKey,
     options:Session.Options
 ) Result<Connection, Sync.Error> {
-    let transport_policy = try encrypted_transport_options(options)
-    match Session.connect(host, port, transport_policy) {
+    let transport_policy = try encrypted_transport_options(options) else error { return Result<Connection,Sync.Error>.failure(error) }
+    match (try Session.connect(host, port, transport_policy)) {
         failure(error) => { return Result<Connection, Sync.Error>.failure(error) }
         success(connection) => {
-            return finish_client_handshake(connection, key, options.maximum_message_bytes)
+            return (try finish_client_handshake(connection, key, options.maximum_message_bytes))
         }
     }
 }
@@ -295,7 +295,7 @@ public func connect_endpoint(
     endpoint:Network.Endpoint,
     key:SharedKey
 ) Result<Connection, Sync.Error> {
-    return connect_endpoint(endpoint, key, default_options())
+    return (try connect_endpoint(endpoint, key, default_options()))
 }
 
 public func connect_endpoint(
@@ -303,11 +303,11 @@ public func connect_endpoint(
     key:SharedKey,
     options:Session.Options
 ) Result<Connection, Sync.Error> {
-    let transport_policy = try encrypted_transport_options(options)
-    match Session.connect_endpoint(endpoint, transport_policy) {
+    let transport_policy = try encrypted_transport_options(options) else error { return Result<Connection,Sync.Error>.failure(error) }
+    match (try Session.connect_endpoint(endpoint, transport_policy)) {
         failure(error) => { return Result<Connection, Sync.Error>.failure(error) }
         success(connection) => {
-            return finish_client_handshake(connection, key, options.maximum_message_bytes)
+            return (try finish_client_handshake(connection, key, options.maximum_message_bytes))
         }
     }
 }
@@ -317,7 +317,7 @@ public func listen(
     port:uint16,
     key:SharedKey
 ) Result<Listener, Sync.Error> {
-    return listen(host, port, key, default_options())
+    return (try listen(host, port, key, default_options()))
 }
 
 public func listen(
@@ -326,8 +326,8 @@ public func listen(
     key:SharedKey,
     options:Session.Options
 ) Result<Listener, Sync.Error> {
-    let transport_policy = try encrypted_transport_options(options)
-    match Session.listen(host, port, transport_policy) {
+    let transport_policy = try encrypted_transport_options(options) else error { return Result<Listener,Sync.Error>.failure(error) }
+    match (try Session.listen(host, port, transport_policy)) {
         failure(error) => { return Result<Listener, Sync.Error>.failure(error) }
         success(listener) => {
             return Result<Listener, Sync.Error>.success(Listener(listener, key, options))
@@ -339,7 +339,7 @@ public func listen_endpoint(
     endpoint:Network.Endpoint,
     key:SharedKey
 ) Result<Listener, Sync.Error> {
-    return listen_endpoint(endpoint, key, default_options())
+    return (try listen_endpoint(endpoint, key, default_options()))
 }
 
 public func listen_endpoint(
@@ -347,8 +347,8 @@ public func listen_endpoint(
     key:SharedKey,
     options:Session.Options
 ) Result<Listener, Sync.Error> {
-    let transport_policy = try encrypted_transport_options(options)
-    match Session.listen_endpoint(endpoint, transport_policy) {
+    let transport_policy = try encrypted_transport_options(options) else error { return Result<Listener,Sync.Error>.failure(error) }
+    match (try Session.listen_endpoint(endpoint, transport_policy)) {
         failure(error) => { return Result<Listener, Sync.Error>.failure(error) }
         success(listener) => {
             return Result<Listener, Sync.Error>.success(Listener(listener, key, options))
@@ -366,7 +366,7 @@ func finish_client_handshake(
     key:SharedKey,
     message_limit:int
 ) Result<Connection, Sync.Error> {
-    match client_handshake(connection, key) {
+    match (try client_handshake(connection, key)) {
         success(keys) => {
             return Result<Connection, Sync.Error>.success(Connection(
                 connection,
@@ -389,7 +389,7 @@ func finish_server_handshake(
     key:SharedKey,
     message_limit:int
 ) Result<Connection, Sync.Error> {
-    match server_handshake(connection, key) {
+    match (try server_handshake(connection, key)) {
         success(keys) => {
             return Result<Connection, Sync.Error>.success(Connection(
                 connection,
@@ -414,16 +414,16 @@ func client_handshake(
     let pair = ephemeral_key_pair()
     let nonce = random_fixed(16)
     let hello = encode_hello(1, @nonce[0:16], @pair.public_key[0:32])
-    try connection.send(65_535, @hello[0:hello.count()])
+    try connection.send(65_535, @hello[0:hello.count()]) else error { return Result<Negotiated,Sync.Error>.failure(error) }
 
-    let response = try connection.receive()
-    try validate_handshake_message(response, 2, 72)
+    let response = try connection.receive() else error { return Result<Negotiated,Sync.Error>.failure(error) }
+    try validate_handshake_message(response, 2, 72) else error { return Result<Negotiated,Sync.Error>.failure(error) }
     let server_nonce = fixed16(@response.payload[8:24])
     let server_public = fixed32(@response.payload[24:56])
     let server_base = copy_bytes(@response.payload[0:56])
     let server_proof = copy_bytes(@response.payload[56:72])
-    let shared = try Crypto.shared_secret(@pair.secret[0:32], @server_public[0:32])
-    let keys = try derive_keys(shared, key, nonce, server_nonce)
+    let shared = try Crypto.shared_secret(@pair.secret[0:32], @server_public[0:32]) else error { return Result<Negotiated,Sync.Error>.failure(error) }
+    let keys = try derive_keys(shared, key, nonce, server_nonce) else error { return Result<Negotiated,Sync.Error>.failure(error) }
     let transcript = joined(@hello[0:hello.count()], @server_base[0:server_base.count()])
     let server_associated = proof_associated(@transcript[0:transcript.count()], 2)
     let server_proof_nonce = message_nonce(2, 0)
@@ -432,7 +432,7 @@ func client_handshake(
         @server_proof_nonce[0:12],
         @server_associated[0:server_associated.count()],
         @server_proof[0:server_proof.count()]
-    )
+    ) else error { return Result<Negotiated,Sync.Error>.failure(error) }
     if !opened.is_empty() {
         return Result<Negotiated, Sync.Error>.failure(handshake_error(
             "server key confirmation carried unexpected plaintext"
@@ -448,9 +448,9 @@ func client_handshake(
         @client_proof_nonce[0:12],
         @client_associated[0:client_associated.count()],
         @empty[0:0]
-    )
+    ) else error { return Result<Negotiated,Sync.Error>.failure(error) }
     let finish = encode_finish(@client_proof[0:client_proof.count()])
-    try connection.send(65_535, @finish[0:finish.count()])
+    try connection.send(65_535, @finish[0:finish.count()]) else error { return Result<Negotiated,Sync.Error>.failure(error) }
     return Result<Negotiated, Sync.Error>.success(keys)
 }
 
@@ -458,14 +458,14 @@ func server_handshake(
     connection:Session.Connection,
     key:SharedKey
 ) Result<Negotiated, Sync.Error> {
-    let request = try connection.receive()
-    try validate_handshake_message(request, 1, 56)
+    let request = try connection.receive() else error { return Result<Negotiated,Sync.Error>.failure(error) }
+    try validate_handshake_message(request, 1, 56) else error { return Result<Negotiated,Sync.Error>.failure(error) }
     let client_nonce = fixed16(@request.payload[8:24])
     let client_public = fixed32(@request.payload[24:56])
     let pair = ephemeral_key_pair()
     let server_nonce = random_fixed(16)
-    let shared = try Crypto.shared_secret(@pair.secret[0:32], @client_public[0:32])
-    let keys = try derive_keys(shared, key, client_nonce, server_nonce)
+    let shared = try Crypto.shared_secret(@pair.secret[0:32], @client_public[0:32]) else error { return Result<Negotiated,Sync.Error>.failure(error) }
+    let keys = try derive_keys(shared, key, client_nonce, server_nonce) else error { return Result<Negotiated,Sync.Error>.failure(error) }
     let server_base = encode_hello(2, @server_nonce[0:16], @pair.public_key[0:32])
     let transcript = joined(
         @request.payload[0:request.payload.count()],
@@ -479,12 +479,12 @@ func server_handshake(
         @server_proof_nonce[0:12],
         @server_associated[0:server_associated.count()],
         @empty[0:0]
-    )
+    ) else error { return Result<Negotiated,Sync.Error>.failure(error) }
     let response = joined(@server_base[0:server_base.count()], @server_proof[0:server_proof.count()])
-    try connection.send(65_535, @response[0:response.count()])
+    try connection.send(65_535, @response[0:response.count()]) else error { return Result<Negotiated,Sync.Error>.failure(error) }
 
-    let finish = try connection.receive()
-    try validate_handshake_message(finish, 3, 24)
+    let finish = try connection.receive() else error { return Result<Negotiated,Sync.Error>.failure(error) }
+    try validate_handshake_message(finish, 3, 24) else error { return Result<Negotiated,Sync.Error>.failure(error) }
     let client_context = joined(@transcript[0:transcript.count()], @server_proof[0:server_proof.count()])
     let client_associated = proof_associated(@client_context[0:client_context.count()], 3)
     let client_proof_nonce = message_nonce(1, 0)
@@ -493,7 +493,7 @@ func server_handshake(
         @client_proof_nonce[0:12],
         @client_associated[0:client_associated.count()],
         @finish.payload[8:24]
-    )
+    ) else error { return Result<Negotiated,Sync.Error>.failure(error) }
     if !opened.is_empty() {
         return Result<Negotiated, Sync.Error>.failure(handshake_error(
             "client key confirmation carried unexpected plaintext"
@@ -505,7 +505,7 @@ func server_handshake(
 func ephemeral_key_pair() Crypto.KeyPair {
     while true {
         let seed = StandardCrypto.random_bytes(32)
-        match Crypto.key_pair(@seed[0:seed.count()]) {
+        match (try Crypto.key_pair(@seed[0:seed.count()])) {
             success(value) => { return value }
             failure(error) => {}
         }
@@ -532,7 +532,7 @@ func derive_keys(
         @salt[0:salt.count()],
         @context[0:context.count()],
         64
-    )
+    ) else error { return Result<Negotiated,Sync.Error>.failure(error) }
     return Result<Negotiated, Sync.Error>.success(Negotiated(
         client_to_server:fixed32(@output[0:32]),
         server_to_client:fixed32(@output[32:64])
@@ -711,5 +711,5 @@ func closed_error(operation:str) Sync.Error {
 }
 
 func close_transport(connection:Session.Connection) {
-    match connection.close() { success => {}; failure(error) => {} }
+    match (try connection.close()) { success => {}; failure(error) => {} }
 }

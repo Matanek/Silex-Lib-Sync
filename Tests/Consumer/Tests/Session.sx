@@ -8,44 +8,44 @@ test "exchange bounded messages through a public Sync session" {
             .with_connect_timeout(2_000)
             .with_write_timeout(2_000)
 
-        var listener = try Session.listen("127.0.0.1", 0, options)
-        let endpoint = try listener.local_endpoint()
-        var client = try Session.connect_endpoint(endpoint, options)
-        var server = try listener.accept()
-        assert((try client.peer_endpoint()).port == endpoint.port)
-        assert((try server.local_endpoint()).port == endpoint.port)
+        var listener = try Session.listen("127.0.0.1", 0, options) else error { return Result<void,Sync.Error>.failure(error) }
+        let endpoint = try listener.local_endpoint() else error { return Result<void,Sync.Error>.failure(error) }
+        var client = try Session.connect_endpoint(endpoint, options) else error { return Result<void,Sync.Error>.failure(error) }
+        var server = try listener.accept() else error { return Result<void,Sync.Error>.failure(error) }
+        assert((try client.peer_endpoint() else error { return Result<void,Sync.Error>.failure(error) }).port == endpoint.port)
+        assert((try server.local_endpoint() else error { return Result<void,Sync.Error>.failure(error) }).port == endpoint.port)
 
-        try client.send_text(0, "")
-        let empty = try server.receive()
+        try client.send_text(0, "") else error { return Result<void,Sync.Error>.failure(error) }
+        let empty = try server.receive() else error { return Result<void,Sync.Error>.failure(error) }
         assert(empty.channel == 0)
-        assert(try empty.text() == "")
+        assert(try empty.text() else error { return Result<void,Sync.Error>.failure(error) } == "")
 
-        try client.send_text(7, "hello from client")
-        let request = try server.receive()
+        try client.send_text(7, "hello from client") else error { return Result<void,Sync.Error>.failure(error) }
+        let request = try server.receive() else error { return Result<void,Sync.Error>.failure(error) }
         assert(request.channel == 7)
-        assert(try request.text() == "hello from client")
+        assert(try request.text() else error { return Result<void,Sync.Error>.failure(error) } == "hello from client")
 
         let bytes:uint8[] = [0, 1, 127, 255]
-        try server.send(9, @bytes[0:bytes.count()])
-        let response = try client.receive()
+        try server.send(9, @bytes[0:bytes.count()]) else error { return Result<void,Sync.Error>.failure(error) }
+        let response = try client.receive() else error { return Result<void,Sync.Error>.failure(error) }
         assert(response.channel == 9)
         assert(response.payload.count() == 4)
         assert(response.payload[0] == 0 && response.payload[3] == 255)
 
-        try client.close()
-        try server.close()
-        try listener.close()
+        try client.close() else error { return Result<void,Sync.Error>.failure(error) }
+        try server.close() else error { return Result<void,Sync.Error>.failure(error) }
+        try listener.close() else error { return Result<void,Sync.Error>.failure(error) }
         assert(client.is_closed() && server.is_closed() && listener.is_closed())
-        match client.send_text(1, "closed") {
+        match (try client.send_text(1, "closed")) {
             success => { panic("closed session should reject messages") }
             failure(error) => { assert(error.kind == Sync.ErrorKind.closed) }
         }
-        try client.close()
-        try listener.close()
+        try client.close() else error { return Result<void,Sync.Error>.failure(error) }
+        try listener.close() else error { return Result<void,Sync.Error>.failure(error) }
         return Result<void, Sync.Error>.success()
     }
 
-    match run() {
+    match (try run()) {
         success => {}
         failure(error) => { panic(error.operation + ": " + error.detail) }
     }
@@ -53,13 +53,13 @@ test "exchange bounded messages through a public Sync session" {
 
 test "reject invalid session resource policies" {
     let invalid = Session.default_options().with_message_limit(0)
-    match Session.listen("127.0.0.1", 0, invalid) {
+    match (try Session.listen("127.0.0.1", 0, invalid)) {
         success(listener) => { panic("invalid message limit should fail") }
         failure(error) => { assert(error.kind == Sync.ErrorKind.invalid_configuration) }
     }
 
     let negative = Session.default_options().with_read_timeout(-1)
-    match Session.listen("127.0.0.1", 0, negative) {
+    match (try Session.listen("127.0.0.1", 0, negative)) {
         success(listener) => { panic("negative timeout should fail") }
         failure(error) => { assert(error.kind == Sync.ErrorKind.invalid_configuration) }
     }
@@ -68,29 +68,29 @@ test "reject invalid session resource policies" {
 test "reject an oversized message before writing the session" {
     func run() Result<void, Sync.Error> {
         let options = Session.default_options().with_message_limit(4)
-        var listener = try Session.listen("127.0.0.1", 0, options)
-        let endpoint = try listener.local_endpoint()
-        var client = try Session.connect("127.0.0.1", endpoint.port, options)
-        var server = try listener.accept()
+        var listener = try Session.listen("127.0.0.1", 0, options) else error { return Result<void,Sync.Error>.failure(error) }
+        let endpoint = try listener.local_endpoint() else error { return Result<void,Sync.Error>.failure(error) }
+        var client = try Session.connect("127.0.0.1", endpoint.port, options) else error { return Result<void,Sync.Error>.failure(error) }
+        var server = try listener.accept() else error { return Result<void,Sync.Error>.failure(error) }
 
         let oversized:uint8[] = [1, 2, 3, 4, 5]
-        match client.send(1, @oversized[0:oversized.count()]) {
+        match (try client.send(1, @oversized[0:oversized.count()])) {
             success => { panic("oversized message should fail") }
             failure(error) => { assert(error.kind == Sync.ErrorKind.message_limit) }
         }
 
-        try client.send_text(2, "safe")
-        let message = try server.receive()
+        try client.send_text(2, "safe") else error { return Result<void,Sync.Error>.failure(error) }
+        let message = try server.receive() else error { return Result<void,Sync.Error>.failure(error) }
         assert(message.channel == 2)
-        assert(try message.text() == "safe")
+        assert(try message.text() else error { return Result<void,Sync.Error>.failure(error) } == "safe")
 
-        try client.close()
-        try server.close()
-        try listener.close()
+        try client.close() else error { return Result<void,Sync.Error>.failure(error) }
+        try server.close() else error { return Result<void,Sync.Error>.failure(error) }
+        try listener.close() else error { return Result<void,Sync.Error>.failure(error) }
         return Result<void, Sync.Error>.success()
     }
 
-    match run() {
+    match (try run()) {
         success => {}
         failure(error) => { panic(error.operation + ": " + error.detail) }
     }

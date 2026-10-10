@@ -57,10 +57,10 @@ func sent(result:Result<void, Sync.Error>) {
 }
 
 func serve(listener:SecureSession.Listener) {
-    var peer = connection(listener.accept())
-    let incoming = message(peer.receive())
-    print("server received: $(text(incoming.text()))")
-    sent(peer.send_text(2, "welcome securely"))
+    var peer = connection((try listener.accept()))
+    let incoming = message((try peer.receive()))
+    print("server received: $(text((try incoming.text())))")
+    sent((try peer.send_text(2, "welcome securely")))
 }
 
 struct Server:Threading.Job {
@@ -70,15 +70,15 @@ struct Server:Threading.Job {
 
 func main() {
     let key = SecureSession.generate_key()
-    var server_listener = listener(SecureSession.listen("127.0.0.1", 0, key))
-    let server_endpoint = endpoint(server_listener.local_endpoint())
+    var server_listener = listener((try SecureSession.listen("127.0.0.1", 0, key)))
+    let server_endpoint = endpoint((try server_listener.local_endpoint()))
     var executor = Threading.Executor(worker_count:1)
     var server = executor.submit(Server(listener:server_listener))
 
-    var client = connection(SecureSession.connect_endpoint(server_endpoint, key))
-    sent(client.send_text(1, "hello securely"))
-    let reply = message(client.receive())
-    print("client received: $(text(reply.text()))")
+    var client = connection((try SecureSession.connect_endpoint(server_endpoint, key)))
+    sent((try client.send_text(1, "hello securely")))
+    let reply = message((try client.receive()))
+    print("client received: $(text((try reply.text())))")
     var completed = server.complete()
 }
 ```

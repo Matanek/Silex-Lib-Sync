@@ -18,26 +18,26 @@ func previous(decision:@Freshness.Decision) uint32 {
 
 test "classify fresh duplicate and stale Netcode sequences" {
     func run() Result<void, Sync.Error> {
-        var tracker = try Freshness.tracker(4)
+        var tracker = try Freshness.tracker(4) else error { return Result<void,Sync.Error>.failure(error) }
         let sender = endpoint(1, 9000)
 
-        let first = try tracker.observe_sequence(sender, 3, 100)
+        let first = try tracker.observe_sequence(sender, 3, 100) else error { return Result<void,Sync.Error>.failure(error) }
         assert(first.kind == Freshness.Kind.first)
         assert(first.should_apply())
         assert(first.previous_sequence == null)
 
-        let newer = try tracker.observe_sequence(sender, 3, 104)
+        let newer = try tracker.observe_sequence(sender, 3, 104) else error { return Result<void,Sync.Error>.failure(error) }
         assert(newer.kind == Freshness.Kind.newer)
         assert(newer.should_apply())
         assert(previous(newer) == 100)
         assert(newer.missed_packets == 3)
 
-        let duplicate = try tracker.observe_sequence(sender, 3, 104)
+        let duplicate = try tracker.observe_sequence(sender, 3, 104) else error { return Result<void,Sync.Error>.failure(error) }
         assert(duplicate.kind == Freshness.Kind.duplicate)
         assert(!duplicate.should_apply())
         assert(previous(duplicate) == 104)
 
-        let stale = try tracker.observe_sequence(sender, 3, 102)
+        let stale = try tracker.observe_sequence(sender, 3, 102) else error { return Result<void,Sync.Error>.failure(error) }
         assert(stale.kind == Freshness.Kind.stale)
         assert(!stale.should_apply())
         assert(previous(stale) == 104)
@@ -45,7 +45,7 @@ test "classify fresh duplicate and stale Netcode sequences" {
         return Result<void, Sync.Error>.success()
     }
 
-    match run() {
+    match (try run()) {
         success => {}
         failure(error) => { panic(error.operation + ": " + error.detail) }
     }
@@ -53,25 +53,25 @@ test "classify fresh duplicate and stale Netcode sequences" {
 
 test "track wrapped sequences independently by source and channel" {
     func run() Result<void, Sync.Error> {
-        var tracker = try Freshness.tracker(4)
+        var tracker = try Freshness.tracker(4) else error { return Result<void,Sync.Error>.failure(error) }
         let first_sender = endpoint(1, 9000)
         let second_sender = endpoint(2, 9000)
 
-        let seeded = try tracker.observe_sequence(first_sender, 1, 4_294_967_295 as uint32)
+        let seeded = try tracker.observe_sequence(first_sender, 1, 4_294_967_295 as uint32) else error { return Result<void,Sync.Error>.failure(error) }
         assert(seeded.kind == Freshness.Kind.first)
-        let wrapped = try tracker.observe_sequence(first_sender, 1, 1)
+        let wrapped = try tracker.observe_sequence(first_sender, 1, 1) else error { return Result<void,Sync.Error>.failure(error) }
         assert(wrapped.kind == Freshness.Kind.newer)
         assert(wrapped.missed_packets == 1)
 
-        let channel = try tracker.observe_sequence(first_sender, 2, 1)
-        let source = try tracker.observe_sequence(second_sender, 1, 1)
+        let channel = try tracker.observe_sequence(first_sender, 2, 1) else error { return Result<void,Sync.Error>.failure(error) }
+        let source = try tracker.observe_sequence(second_sender, 1, 1) else error { return Result<void,Sync.Error>.failure(error) }
         assert(channel.kind == Freshness.Kind.first)
         assert(source.kind == Freshness.Kind.first)
         assert(tracker.stream_count() == 3)
         return Result<void, Sync.Error>.success()
     }
 
-    match run() {
+    match (try run()) {
         success => {}
         failure(error) => { panic(error.operation + ": " + error.detail) }
     }
@@ -79,23 +79,23 @@ test "track wrapped sequences independently by source and channel" {
 
 test "enforce and explicitly release freshness stream capacity" {
     func run() Result<void, Sync.Error> {
-        var tracker = try Freshness.tracker(2)
+        var tracker = try Freshness.tracker(2) else error { return Result<void,Sync.Error>.failure(error) }
         let first_sender = endpoint(1, 9000)
         let second_sender = endpoint(2, 9000)
 
-        let first = try tracker.observe_sequence(first_sender, 1, 0)
-        let second = try tracker.observe_sequence(first_sender, 2, 0)
+        let first = try tracker.observe_sequence(first_sender, 1, 0) else error { return Result<void,Sync.Error>.failure(error) }
+        let second = try tracker.observe_sequence(first_sender, 2, 0) else error { return Result<void,Sync.Error>.failure(error) }
         assert(first.kind == Freshness.Kind.first && second.kind == Freshness.Kind.first)
         assert(tracker.is_full())
 
-        match tracker.observe_sequence(second_sender, 1, 0) {
+        match (try tracker.observe_sequence(second_sender, 1, 0)) {
             success(value) => { panic("full freshness tracker should reject a new stream") }
             failure(error) => { assert(error.kind == Sync.ErrorKind.resource_limit) }
         }
 
         assert(tracker.forget(first_sender, 1))
         assert(!tracker.forget(first_sender, 1))
-        let admitted = try tracker.observe_sequence(second_sender, 1, 0)
+        let admitted = try tracker.observe_sequence(second_sender, 1, 0) else error { return Result<void,Sync.Error>.failure(error) }
         assert(admitted.kind == Freshness.Kind.first)
 
         tracker.clear()
@@ -104,18 +104,18 @@ test "enforce and explicitly release freshness stream capacity" {
         return Result<void, Sync.Error>.success()
     }
 
-    match run() {
+    match (try run()) {
         success => {}
         failure(error) => { panic(error.operation + ": " + error.detail) }
     }
 }
 
 test "reject invalid freshness capacities" {
-    match Freshness.tracker(0) {
+    match (try Freshness.tracker(0)) {
         success(value) => { panic("zero freshness capacity should fail") }
         failure(error) => { assert(error.kind == Sync.ErrorKind.invalid_configuration) }
     }
-    match Freshness.tracker(65_537) {
+    match (try Freshness.tracker(65_537)) {
         success(value) => { panic("excessive freshness capacity should fail") }
         failure(error) => { assert(error.kind == Sync.ErrorKind.invalid_configuration) }
     }

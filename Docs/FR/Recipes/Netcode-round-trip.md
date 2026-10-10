@@ -9,30 +9,30 @@ use Sync.Netcode
 use Sync.Netcode.Freshness
 
 func run() Result<void, Sync.Error> {
-    var server = try Netcode.bind("127.0.0.1", 0)
-    var client = try Netcode.bind("127.0.0.1", 0)
-    var freshness = try Freshness.tracker()
-    let destination = try server.local_endpoint()
+    var server = try Netcode.bind("127.0.0.1", 0) else error { return Result<void,Sync.Error>.failure(error) }
+    var client = try Netcode.bind("127.0.0.1", 0) else error { return Result<void,Sync.Error>.failure(error) }
+    var freshness = try Freshness.tracker() else error { return Result<void,Sync.Error>.failure(error) }
+    let destination = try server.local_endpoint() else error { return Result<void,Sync.Error>.failure(error) }
 
     var sequence = Netcode.Sequencer()
     let position:uint8[] = [12, 34, 56]
-    try client.send(destination, 1, sequence.take(), @position[0:position.count()])
+    try client.send(destination, 1, sequence.take(), @position[0:position.count()]) else error { return Result<void,Sync.Error>.failure(error) }
 
     var payload:uint8[1_200]
     var payload_view = &payload[0:payload.count()]
-    let update = try server.receive_into(payload_view)
-    let decision = try freshness.observe(update)
+    let update = try server.receive_into(payload_view) else error { return Result<void,Sync.Error>.failure(error) }
+    let decision = try freshness.observe(update) else error { return Result<void,Sync.Error>.failure(error) }
     if decision.should_apply() {
         print("channel $(update.channel), sequence $(update.sequence), " +
             "$(update.payload_bytes) fresh state bytes")
     }
 
-    try client.close()
-    return server.close()
+    try client.close() else error { return Result<void,Sync.Error>.failure(error) }
+    return (try server.close())
 }
 
 func main() {
-    match run() {
+    match (try run()) {
         success => {}
         failure(error) => { panic(error.operation + ": " + error.detail) }
     }
